@@ -1,0 +1,11 @@
+//! TensorRT Converter — shared library for all application modules.
+//!
+//! Both the server binary and WASM client are compiled from this library.
+//! Server-only modules are gated with `#[cfg(not(target_arch = "wasm32"))]`.
+
+pub mod app;
+pub mod errors;
+pub mod models;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub mod server;
