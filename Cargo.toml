@@ -16,6 +16,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 thiserror = "2"
 tracing = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
+futures-timer = "3"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -26,8 +27,21 @@ toml = "0.8"
 tempfile = "3"
 tokio-stream = "0.1"
 
+[[test]]
+name = "validation_test"
+path = "tests/unit/validation_test.rs"
+
+[[test]]
+name = "progress_test"
+path = "tests/unit/progress_test.rs"
+
+[[test]]
+name = "docker_test"
+path = "tests/integration/docker_test.rs"
+
 [dev-dependencies]
 pretty_assertions = "1"
+tokio = { version = "1", features = ["full"] }
 
 [profile.release]
 opt-level = "s"

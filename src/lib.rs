@@ -5,8 +5,10 @@
 
 pub mod api;
 pub mod app;
+pub mod components;
 pub mod errors;
 pub mod models;
+pub mod routes;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod server;
