@@ -4,6 +4,8 @@ use crate::components::Navbar;
 use crate::routes::{HomePage, JobDetailPage, JobsPage};
 use dioxus::prelude::*;
 
+const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
+
 /// Top-level route enum for the application.
 #[derive(Clone, Routable, Debug, PartialEq)]
 #[rustfmt::skip]
@@ -35,6 +37,7 @@ fn AppLayout() -> Element {
 #[component]
 pub fn App() -> Element {
     rsx! {
+        document::Stylesheet { href: TAILWIND_CSS }
         Router::<Route> {}
     }
 }
