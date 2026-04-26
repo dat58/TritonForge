@@ -18,6 +18,11 @@ pub struct DockerService {
 }
 
 impl DockerService {
+    /// Returns a reference to the underlying Bollard [`Docker`] client.
+    pub fn client(&self) -> &Docker {
+        &self.client
+    }
+
     /// Connects to the Docker daemon using default socket paths.
     ///
     /// # Examples
