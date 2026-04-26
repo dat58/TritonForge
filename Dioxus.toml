@@ -1,6 +1,6 @@
 [application]
 name = "tensorrt-converter"
-default_platform = "web"
+default_platform = "fullstack"
 asset_dir = "assets"
 
 [web.app]

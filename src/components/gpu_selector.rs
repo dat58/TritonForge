@@ -1,14 +1,23 @@
 //! GPU device picker dropdown component.
 
 use crate::api::get_available_gpus;
-use crate::models::config::GpuId;
+use crate::models::config::{GpuId, GpuInfo};
 use dioxus::prelude::*;
 
 /// Dropdown for selecting an available NVIDIA GPU, with a manual-entry fallback
 /// when `nvidia-smi` is unavailable or reports no devices.
 #[component]
 pub fn GpuSelector(on_select: EventHandler<Option<GpuId>>, selected_gpu: Option<GpuId>) -> Element {
-    let gpus = use_resource(get_available_gpus);
+    let mut gpus: Signal<Option<Result<Vec<GpuInfo>, String>>> = use_signal(|| None);
+
+    // use_effect is client-only (skipped during SSR), keeping the initial render tree
+    // identical on both server and client so hydration assigns data-dioxus-id correctly.
+    use_effect(move || {
+        spawn(async move {
+            let result = get_available_gpus().await.map_err(|e| e.to_string());
+            gpus.set(Some(result));
+        });
+    });
 
     rsx! {
         div { class: "flex flex-col gap-1.5",

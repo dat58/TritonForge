@@ -2,6 +2,7 @@
 
 use crate::api::get_available_templates;
 use crate::models::job::ModelFormat;
+use crate::models::template::ConfigTemplate;
 use dioxus::prelude::*;
 
 /// Dropdown for selecting a Triton `config.pbtxt` template.
@@ -11,7 +12,16 @@ pub fn TemplateSelector(
     selected_template: Option<String>,
     model_format: Option<ModelFormat>,
 ) -> Element {
-    let templates = use_resource(get_available_templates);
+    let mut templates: Signal<Option<Result<Vec<ConfigTemplate>, String>>> = use_signal(|| None);
+
+    // use_effect is client-only (skipped during SSR), keeping the initial render tree
+    // identical on both server and client so hydration assigns data-dioxus-id correctly.
+    use_effect(move || {
+        spawn(async move {
+            let result = get_available_templates().await.map_err(|e| e.to_string());
+            templates.set(Some(result));
+        });
+    });
 
     rsx! {
         div { class: "flex flex-col gap-1.5",

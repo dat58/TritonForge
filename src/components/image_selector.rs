@@ -1,6 +1,7 @@
 //! TensorRT Docker image picker dropdown component.
 
 use crate::api::get_available_images;
+use crate::models::config::TensorRtImage;
 use dioxus::prelude::*;
 
 /// Dropdown for selecting a locally available TensorRT Docker image.
@@ -9,7 +10,16 @@ pub fn ImageSelector(
     on_select: EventHandler<Option<String>>,
     selected_image: Option<String>,
 ) -> Element {
-    let images = use_resource(get_available_images);
+    let mut images: Signal<Option<Result<Vec<TensorRtImage>, String>>> = use_signal(|| None);
+
+    // use_effect is client-only (skipped during SSR), keeping the initial render tree
+    // identical on both server and client so hydration assigns data-dioxus-id correctly.
+    use_effect(move || {
+        spawn(async move {
+            let result = get_available_images().await.map_err(|e| e.to_string());
+            images.set(Some(result));
+        });
+    });
 
     rsx! {
         div { class: "flex flex-col gap-1.5",
