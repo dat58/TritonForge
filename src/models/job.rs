@@ -55,7 +55,7 @@ pub enum JobStatus {
 }
 
 /// Full record for a model conversion job.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConversionJob {
     /// Unique job identifier.
     pub id: JobId,
