@@ -4,7 +4,8 @@ use crate::api::get_available_gpus;
 use crate::models::config::GpuId;
 use dioxus::prelude::*;
 
-/// Dropdown for selecting an available NVIDIA GPU.
+/// Dropdown for selecting an available NVIDIA GPU, with a manual-entry fallback
+/// when `nvidia-smi` is unavailable or reports no devices.
 #[component]
 pub fn GpuSelector(on_select: EventHandler<Option<GpuId>>, selected_gpu: Option<GpuId>) -> Element {
     let gpus = use_resource(get_available_gpus);
@@ -15,12 +16,8 @@ pub fn GpuSelector(on_select: EventHandler<Option<GpuId>>, selected_gpu: Option<
                 "GPU Device"
             }
             {match &*gpus.read() {
-                None => rsx! { {skeleton_placeholder("Detecting GPUs...")} },
-                Some(Err(e)) => rsx! { {error_box(&e.to_string())} },
-                Some(Ok(list)) if list.is_empty() => rsx! {
-                    {info_box("No NVIDIA GPUs detected. Check nvidia-smi.")}
-                },
-                Some(Ok(list)) => rsx! {
+                None => rsx! { {loading_placeholder("Detecting GPUs…")} },
+                Some(Ok(list)) if !list.is_empty() => rsx! {
                     select {
                         class: "field",
                         onchange: move |evt| {
@@ -36,34 +33,54 @@ pub fn GpuSelector(on_select: EventHandler<Option<GpuId>>, selected_gpu: Option<
                             option {
                                 value: "{gpu.id.0}",
                                 selected: selected_gpu == Some(gpu.id),
-                                "{gpu.name}   ({gpu.memory_mb} MB VRAM)"
+                                "GPU {gpu.id.0}  ·  {gpu.name}  ·  {gpu.memory_mb} MB"
                             }
                         }
                     }
+                },
+                Some(Ok(_)) => rsx! {
+                    {info_box("No NVIDIA GPUs detected via nvidia-smi.")}
+                    {manual_id_input(on_select, selected_gpu)}
+                },
+                Some(Err(_)) => rsx! {
+                    {info_box("GPU auto-detection unavailable.")}
+                    {manual_id_input(on_select, selected_gpu)}
                 },
             }}
         }
     }
 }
 
-fn skeleton_placeholder(msg: &str) -> Element {
+fn loading_placeholder(msg: &str) -> Element {
     rsx! {
         div { class: "field text-slate-500 animate-pulse", "{msg}" }
     }
 }
 
-fn error_box(msg: &str) -> Element {
+fn info_box(msg: &str) -> Element {
     rsx! {
-        div { class: "rounded-lg px-3 py-2.5 text-rose-400 text-sm border border-rose-800/50 bg-rose-950/30",
+        div { class: "rounded-lg px-3 py-2 text-amber-400 text-xs border border-amber-800/50 bg-amber-950/30",
             "{msg}"
         }
     }
 }
 
-fn info_box(msg: &str) -> Element {
+fn manual_id_input(on_select: EventHandler<Option<GpuId>>, selected_gpu: Option<GpuId>) -> Element {
     rsx! {
-        div { class: "rounded-lg px-3 py-2.5 text-amber-400 text-sm border border-amber-800/50 bg-amber-950/30",
-            "{msg}"
+        div { class: "flex items-center gap-2",
+            span { class: "text-slate-500 text-xs whitespace-nowrap", "GPU index:" }
+            input {
+                r#type: "number",
+                class: "field",
+                min: "0",
+                max: "15",
+                placeholder: "0",
+                value: selected_gpu.map(|g| g.0.to_string()).unwrap_or_default(),
+                oninput: move |evt| {
+                    let selected = evt.value().trim().parse::<u32>().ok().map(GpuId);
+                    on_select.call(selected);
+                },
+            }
         }
     }
 }

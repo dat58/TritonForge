@@ -108,12 +108,54 @@ fn parse_job_id(s: &str) -> Result<JobId, AppError> {
 // Server functions (compiled for both targets via #[server] macro)
 // ---------------------------------------------------------------------------
 
-/// Returns the TensorRT Docker images present in the local image cache.
+/// Returns the TensorRT Docker images present in the local image cache,
+/// falling back to a curated list of known images when Docker is unavailable.
 #[server]
 #[tracing::instrument(skip_all)]
 pub async fn get_available_images() -> Result<Vec<TensorRtImage>, ServerFnError> {
-    let docker = docker_service().await.map_err(to_server_err)?;
-    docker.list_tensorrt_images().await.map_err(to_server_err)
+    let local_images = match docker_service().await {
+        Ok(docker) => docker.list_tensorrt_images().await.unwrap_or_default(),
+        Err(e) => {
+            tracing::warn!(error = ?e, "Docker unavailable; returning curated image list");
+            vec![]
+        }
+    };
+
+    if !local_images.is_empty() {
+        return Ok(local_images);
+    }
+
+    Ok(curated_tensorrt_images())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn curated_tensorrt_images() -> Vec<TensorRtImage> {
+    vec![
+        TensorRtImage {
+            name: "TensorRT 10.3 — CUDA 12.6 (latest)".into(),
+            tag: "nvcr.io/nvidia/tensorrt:24.08-py3".into(),
+            cuda_version: "12.6".into(),
+            tensorrt_version: "10.3".into(),
+        },
+        TensorRtImage {
+            name: "TensorRT 10.0 — CUDA 12.4".into(),
+            tag: "nvcr.io/nvidia/tensorrt:24.04-py3".into(),
+            cuda_version: "12.4".into(),
+            tensorrt_version: "10.0".into(),
+        },
+        TensorRtImage {
+            name: "TensorRT 9.3 — CUDA 12.2".into(),
+            tag: "nvcr.io/nvidia/tensorrt:23.12-py3".into(),
+            cuda_version: "12.2".into(),
+            tensorrt_version: "9.3".into(),
+        },
+        TensorRtImage {
+            name: "TensorRT 8.6 — CUDA 12.0".into(),
+            tag: "nvcr.io/nvidia/tensorrt:23.04-py3".into(),
+            cuda_version: "12.0".into(),
+            tensorrt_version: "8.6".into(),
+        },
+    ]
 }
 
 /// Returns all NVIDIA GPUs detected by nvidia-smi.
