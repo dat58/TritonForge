@@ -5,8 +5,6 @@ use crate::models::job::ModelFormat;
 use dioxus::prelude::*;
 
 /// Dropdown for selecting a Triton `config.pbtxt` template.
-///
-/// Filters the list to only show templates compatible with the given `model_format`.
 #[component]
 pub fn TemplateSelector(
     on_select: EventHandler<Option<String>>,
@@ -16,18 +14,16 @@ pub fn TemplateSelector(
     let templates = use_resource(get_available_templates);
 
     rsx! {
-        div { class: "flex flex-col gap-1",
-            label { class: "text-sm font-medium text-gray-300", "Config Template" }
+        div { class: "flex flex-col gap-1.5",
+            label { class: "text-xs font-semibold uppercase tracking-wider text-slate-400",
+                "Config Template"
+            }
             {match &*templates.read() {
                 None => rsx! {
-                    div {
-                        class: "bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-gray-400 text-sm animate-pulse",
-                        "Loading templates..."
-                    }
+                    div { class: "field text-slate-500 animate-pulse", "Loading templates..." }
                 },
                 Some(Err(e)) => rsx! {
-                    div {
-                        class: "bg-red-900/20 border border-red-700 rounded-lg px-3 py-2 text-red-400 text-sm",
+                    div { class: "rounded-lg px-3 py-2.5 text-rose-400 text-sm border border-rose-800/50 bg-rose-950/30",
                         "Failed to load templates: {e}"
                     }
                 },
@@ -43,15 +39,14 @@ pub fn TemplateSelector(
 
                     if filtered.is_empty() {
                         rsx! {
-                            div {
-                                class: "bg-yellow-900/20 border border-yellow-700 rounded-lg px-3 py-2 text-yellow-400 text-sm",
-                                "No templates available. Add .pbtxt files to the templates/ directory."
+                            div { class: "rounded-lg px-3 py-2.5 text-amber-400 text-sm border border-amber-800/50 bg-amber-950/30",
+                                "No templates available. Add .pbtxt files to templates/ directory."
                             }
                         }
                     } else {
                         rsx! {
                             select {
-                                class: "bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-gray-100 text-sm focus:outline-none focus:border-blue-500 cursor-pointer w-full",
+                                class: "field",
                                 onchange: move |evt| {
                                     let val = evt.value();
                                     let selected = if val.is_empty() { None } else { Some(val) };
@@ -61,7 +56,8 @@ pub fn TemplateSelector(
                                 for tmpl in &filtered {
                                     option {
                                         value: "{tmpl.name}",
-                                        selected: selected_template.as_deref() == Some(tmpl.name.as_str()),
+                                        selected: selected_template.as_deref()
+                                            == Some(tmpl.name.as_str()),
                                         "{tmpl.description}"
                                     }
                                 }

@@ -8,17 +8,15 @@ use std::time::Duration;
 
 /// Visual progress bar for a conversion job.
 ///
-/// When `auto_refresh` is true, polls `get_job_status` every 2 seconds
-/// until the job reaches a terminal state (Completed or Failed).
+/// Polls `get_job_status` every 2 seconds when `auto_refresh` is true,
+/// stopping when the job reaches a terminal state.
 #[component]
 pub fn ProgressBar(job_id: JobId, auto_refresh: bool) -> Element {
     let mut job_data: Signal<Option<ConversionJob>> = use_signal(|| None);
     let mut poll_error: Signal<Option<String>> = use_signal(|| None);
 
-    // Capture id_str before the closure so only a Clone-able String is moved.
     let id_str = job_id.to_string();
     use_coroutine(move |_rx: UnboundedReceiver<()>| {
-        // Clone here (outside async) so the closure remains FnMut-compatible.
         let id = id_str.clone();
         async move {
             loop {
@@ -44,18 +42,20 @@ pub fn ProgressBar(job_id: JobId, auto_refresh: bool) -> Element {
         }
     });
 
-    let job = job_data.read();
-
     rsx! {
-        div { class: "flex flex-col gap-3",
+        div { class: "flex flex-col gap-4",
             if let Some(ref err) = *poll_error.read() {
-                div { class: "text-red-400 text-sm", "Polling error: {err}" }
+                div { class: "rounded-lg px-3 py-2.5 text-rose-400 text-sm border border-rose-800/50 bg-rose-950/30",
+                    "Polling error: {err}"
+                }
             }
-            if let Some(ref j) = *job {
+            if let Some(ref j) = *job_data.read() {
                 {render_job_progress(j)}
             } else {
-                div { class: "flex items-center gap-2 text-gray-400 text-sm",
-                    div { class: "w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" }
+                div { class: "flex items-center gap-3 text-slate-400 text-sm",
+                    div {
+                        class: "w-4 h-4 rounded-full border-2 border-cyan-500 border-t-transparent animate-spin flex-shrink-0"
+                    }
                     "Loading job status..."
                 }
             }
@@ -64,23 +64,33 @@ pub fn ProgressBar(job_id: JobId, auto_refresh: bool) -> Element {
 }
 
 fn render_job_progress(job: &ConversionJob) -> Element {
-    let (bar_color, status_color, label) = status_styles(&job.status);
+    let (bar_color, label_class, label) = status_styles(&job.status);
     let pct = job.progress_percent;
 
     rsx! {
-        div { class: "flex flex-col gap-2",
-            div { class: "flex items-center justify-between text-sm",
-                span { class: "font-medium {status_color}", "{label}" }
-                span { class: "text-gray-400", "{pct}%" }
+        div { class: "flex flex-col gap-3",
+            div { class: "flex items-center justify-between",
+                div { class: "flex items-center gap-2",
+                    div { class: "w-2 h-2 rounded-full {bar_color}" }
+                    span { class: "text-sm font-medium {label_class}", "{label}" }
+                }
+                span {
+                    class: "text-sm font-semibold",
+                    style: "color: #22d3ee;",
+                    "{pct}%"
+                }
             }
-            div { class: "w-full bg-gray-700 rounded-full h-3 overflow-hidden",
+            // Progress track
+            div { class: "w-full bg-slate-800 rounded-full h-2.5 overflow-hidden",
                 div {
-                    class: "h-3 rounded-full transition-all duration-500 {bar_color}",
-                    style: "width: {pct}%",
+                    class: "h-2.5 rounded-full transition-all duration-700",
+                    style: "width: {pct}%; background: linear-gradient(90deg, #0891b2, #0d9488);",
                 }
             }
             if let Some(ref err) = job.error_message {
-                div { class: "text-red-400 text-sm mt-1", "{err}" }
+                div { class: "rounded-lg px-3 py-2 text-rose-400 text-xs border border-rose-800/40 bg-rose-950/20",
+                    "{err}"
+                }
             }
         }
     }
@@ -88,11 +98,11 @@ fn render_job_progress(job: &ConversionJob) -> Element {
 
 fn status_styles(status: &JobStatus) -> (&'static str, &'static str, &'static str) {
     match status {
-        JobStatus::Pending => ("bg-gray-500", "text-gray-400", "Pending"),
-        JobStatus::Preparing => ("bg-blue-500 animate-pulse", "text-blue-400", "Preparing"),
-        JobStatus::Converting => ("bg-blue-500 animate-pulse", "text-blue-400", "Converting"),
-        JobStatus::Finalizing => ("bg-blue-400 animate-pulse", "text-blue-300", "Finalizing"),
-        JobStatus::Completed => ("bg-green-500", "text-green-400", "Completed"),
-        JobStatus::Failed => ("bg-red-500", "text-red-400", "Failed"),
+        JobStatus::Pending => ("bg-slate-500", "text-slate-400", "Pending"),
+        JobStatus::Preparing => ("bg-cyan-500 animate-pulse", "text-cyan-400", "Preparing"),
+        JobStatus::Converting => ("bg-cyan-500 animate-pulse", "text-cyan-400", "Converting"),
+        JobStatus::Finalizing => ("bg-cyan-400 animate-pulse", "text-cyan-300", "Finalizing"),
+        JobStatus::Completed => ("bg-emerald-500", "text-emerald-400", "Completed"),
+        JobStatus::Failed => ("bg-rose-500", "text-rose-400", "Failed"),
     }
 }

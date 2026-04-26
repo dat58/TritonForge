@@ -24,7 +24,7 @@ pub enum Route {
 #[component]
 fn AppLayout() -> Element {
     rsx! {
-        div { class: "min-h-screen bg-gray-950",
+        div { class: "min-h-screen",
             Navbar {}
             Outlet::<Route> {}
         }
@@ -57,14 +57,16 @@ fn JobDetail(id: String) -> Element {
 #[component]
 fn NotFound(segments: Vec<String>) -> Element {
     rsx! {
-        div { class: "min-h-screen bg-gray-950 text-gray-100 flex items-center justify-center",
+        div { class: "min-h-screen flex items-center justify-center",
             div { class: "text-center",
-                h1 { class: "text-6xl font-bold text-gray-700 mb-4", "404" }
-                p { class: "text-gray-400 mb-6", "Page not found: /{segments.join(\"/\")}" }
+                h1 { class: "text-8xl font-bold text-slate-800 mb-4", "404" }
+                p { class: "text-slate-500 mb-6",
+                    "Page not found: /{segments.join(\"/\")}"
+                }
                 Link {
                     to: Route::Home {},
-                    class: "text-blue-400 hover:underline",
-                    "Go to Home"
+                    class: "text-cyan-400 hover:text-cyan-300 transition-colors",
+                    "← Go to Home"
                 }
             }
         }
