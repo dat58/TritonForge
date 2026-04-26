@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
-use tracing::{instrument, Instrument};
+use tracing::{Instrument, instrument};
 
 /// 16 GiB memory limit per conversion container.
 const CONTAINER_MEMORY_BYTES: i64 = 16 * 1024 * 1024 * 1024;
