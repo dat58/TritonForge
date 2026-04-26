@@ -85,3 +85,57 @@ pub struct ConversionJob {
 
 // Import GpuId here to avoid circular dependency in the struct definition
 use crate::models::config::GpuId;
+
+impl std::fmt::Display for ModelFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Onnx => write!(f, "onnx"),
+            Self::TensorFlowSavedModel => write!(f, "tensorflow_saved_model"),
+        }
+    }
+}
+
+impl std::str::FromStr for ModelFormat {
+    type Err = crate::errors::AppError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "onnx" => Ok(Self::Onnx),
+            "tensorflow_saved_model" => Ok(Self::TensorFlowSavedModel),
+            other => Err(crate::errors::AppError::Validation(format!(
+                "unknown model format: {other}"
+            ))),
+        }
+    }
+}
+
+impl std::fmt::Display for JobStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pending => write!(f, "pending"),
+            Self::Preparing => write!(f, "preparing"),
+            Self::Converting => write!(f, "converting"),
+            Self::Finalizing => write!(f, "finalizing"),
+            Self::Completed => write!(f, "completed"),
+            Self::Failed => write!(f, "failed"),
+        }
+    }
+}
+
+impl std::str::FromStr for JobStatus {
+    type Err = crate::errors::AppError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "pending" => Ok(Self::Pending),
+            "preparing" => Ok(Self::Preparing),
+            "converting" => Ok(Self::Converting),
+            "finalizing" => Ok(Self::Finalizing),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            other => Err(crate::errors::AppError::Validation(format!(
+                "unknown job status: {other}"
+            ))),
+        }
+    }
+}
