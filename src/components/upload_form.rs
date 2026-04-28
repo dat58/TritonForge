@@ -6,7 +6,6 @@ use crate::components::{GpuSelector, ImageSelector, TemplateSelector};
 use crate::models::config::GpuId;
 use crate::models::job::{ModelFormat, SubmitJobRequest, TrtOptions};
 use dioxus::prelude::*;
-use futures_util::StreamExt;
 
 /// Main upload form for submitting a new TensorRT conversion job.
 #[component]
@@ -81,7 +80,7 @@ pub fn UploadForm() -> Element {
                                     model_format.set(detected);
                                 }
 
-                                match read_file_with_progress(file, size, file_load_progress).await {
+                                match read_selected_file(file, file_load_progress).await {
                                     Ok(bytes) => {
                                         file_load_progress.set(Some(100));
                                         file_bytes.set(Some(bytes));
@@ -403,31 +402,12 @@ pub fn UploadForm() -> Element {
     }
 }
 
-async fn read_file_with_progress(
+async fn read_selected_file(
     file: dioxus::html::FileData,
-    total_size: u64,
     mut progress: Signal<Option<u8>>,
 ) -> Result<Vec<u8>, dioxus::CapturedError> {
-    let mut bytes = Vec::with_capacity(total_size as usize);
-    let mut loaded = 0u64;
-    let mut stream = file.byte_stream();
-
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        loaded += chunk.len() as u64;
-        bytes.extend_from_slice(chunk.as_ref());
-        progress.set(Some(read_progress_percent(loaded, total_size)));
-    }
-
-    Ok(bytes)
-}
-
-fn read_progress_percent(loaded: u64, total_size: u64) -> u8 {
-    if total_size == 0 {
-        return 100;
-    }
-
-    ((loaded.saturating_mul(100) / total_size).min(100)) as u8
+    progress.set(Some(10));
+    file.read_bytes().await.map(|bytes| bytes.to_vec())
 }
 
 fn detect_format(name: &str) -> Option<ModelFormat> {
