@@ -2,12 +2,15 @@
 
 use crate::errors::AppError;
 use crate::models::config::GpuId;
-use crate::models::job::{ConversionJob, JobId, JobStatus, ModelFormat, TrtOptions};
+use crate::models::job::{
+    ConversionJob, ConversionJobLog, JobId, JobStatus, ModelFormat, TrtOptions,
+};
 use chrono::DateTime;
-use sqlx::sqlite::SqliteConnectOptions;
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode};
 use sqlx::{FromRow, SqlitePool};
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::time::Duration;
 use tracing::instrument;
 
 /// Shared connection pool alias.
@@ -19,8 +22,16 @@ pub type DbPool = SqlitePool;
 /// or the special `sqlite::memory:` for in-memory testing.
 #[instrument(skip_all, fields(database_url))]
 pub async fn init_db(database_url: &str) -> Result<DbPool, AppError> {
-    let options = SqliteConnectOptions::from_str(database_url)?.create_if_missing(true);
+    let options = SqliteConnectOptions::from_str(database_url)?
+        .create_if_missing(true)
+        .busy_timeout(Duration::from_secs(10));
     create_database_parent_dir(options.get_filename()).await?;
+
+    let options = if options.get_filename() == std::path::Path::new(":memory:") {
+        options
+    } else {
+        options.journal_mode(SqliteJournalMode::Wal)
+    };
 
     let pool = SqlitePool::connect_with(options).await?;
     sqlx::migrate!()
@@ -49,10 +60,10 @@ async fn create_database_parent_dir(path: &std::path::Path) -> Result<(), AppErr
 struct ConversionJobRow {
     id: String,
     model_name: String,
+    model_version: i64,
     model_format: String,
     image_tag: String,
     gpu_id: i64,
-    template_name: String,
     trt_options: String,
     status: String,
     progress_percent: i64,
@@ -70,6 +81,8 @@ fn row_to_job(row: ConversionJobRow) -> Result<ConversionJob, AppError> {
 
     let gpu_raw = u32::try_from(row.gpu_id)
         .map_err(|_| AppError::Validation("gpu_id out of u32 range".into()))?;
+    let model_version = u32::try_from(row.model_version)
+        .map_err(|_| AppError::Validation("model_version out of u32 range".into()))?;
 
     let created_at = DateTime::parse_from_rfc3339(&row.created_at)
         .map_err(|e| AppError::Validation(format!("invalid created_at: {e}")))?
@@ -85,18 +98,43 @@ fn row_to_job(row: ConversionJobRow) -> Result<ConversionJob, AppError> {
     Ok(ConversionJob {
         id: JobId(id_uuid),
         model_name: row.model_name,
+        model_version,
         model_format: ModelFormat::from_str(&row.model_format)?,
         image_tag: row.image_tag,
         gpu_id: GpuId(gpu_raw),
-        template_name: row.template_name,
         trt_options,
         status: JobStatus::from_str(&row.status)?,
-        progress_percent: u8::try_from(row.progress_percent).unwrap_or(100),
+        progress_percent: checked_progress(row.progress_percent)?,
         output_path: row.output_path.map(PathBuf::from),
         error_message: row.error_message,
         created_at,
         updated_at,
     })
+}
+
+fn checked_progress(progress: i64) -> Result<u8, AppError> {
+    u8::try_from(progress)
+        .map(|value| value.min(100))
+        .map_err(|_| AppError::Validation("progress_percent out of u8 range".into()))
+}
+
+/// New conversion log line ready for insertion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewJobLog {
+    /// Container stream name, usually `stdout` or `stderr`.
+    pub stream: String,
+    /// Log line text.
+    pub message: String,
+}
+
+impl NewJobLog {
+    /// Builds a new persisted log row payload.
+    pub fn new(stream: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            stream: stream.into(),
+            message: message.into(),
+        }
+    }
 }
 
 /// Inserts a new job record into the database.
@@ -107,16 +145,17 @@ pub async fn insert_job(pool: &DbPool, job: &ConversionJob) -> Result<(), AppErr
 
     sqlx::query(
         "INSERT INTO conversion_jobs \
-         (id, model_name, model_format, image_tag, gpu_id, template_name, trt_options, \
+         (id, model_name, model_version, model_format, image_tag, gpu_id, template_name, trt_options, \
           status, progress_percent, output_path, error_message, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(job.id.to_string())
     .bind(&job.model_name)
+    .bind(i64::from(job.model_version))
     .bind(job.model_format.to_string())
     .bind(&job.image_tag)
     .bind(i64::from(job.gpu_id.0))
-    .bind(&job.template_name)
+    .bind("config")
     .bind(trt_options_json)
     .bind(job.status.to_string())
     .bind(i64::from(job.progress_percent))
@@ -210,7 +249,7 @@ pub async fn update_job_failed(
 #[instrument(skip(pool), fields(job_id = %job_id))]
 pub async fn get_job(pool: &DbPool, job_id: &JobId) -> Result<ConversionJob, AppError> {
     let row = sqlx::query_as::<_, ConversionJobRow>(
-        "SELECT id, model_name, model_format, image_tag, gpu_id, template_name, trt_options, \
+        "SELECT id, model_name, model_version, model_format, image_tag, gpu_id, trt_options, \
          status, progress_percent, output_path, error_message, created_at, updated_at \
          FROM conversion_jobs WHERE id = ?",
     )
@@ -229,7 +268,7 @@ pub async fn list_jobs(
     offset: u32,
 ) -> Result<Vec<ConversionJob>, AppError> {
     let rows = sqlx::query_as::<_, ConversionJobRow>(
-        "SELECT id, model_name, model_format, image_tag, gpu_id, template_name, trt_options, \
+        "SELECT id, model_name, model_version, model_format, image_tag, gpu_id, trt_options, \
          status, progress_percent, output_path, error_message, created_at, updated_at \
          FROM conversion_jobs \
          ORDER BY created_at DESC \
@@ -243,9 +282,109 @@ pub async fn list_jobs(
     rows.into_iter().map(row_to_job).collect()
 }
 
+#[derive(Debug, FromRow)]
+struct ConversionJobLogRow {
+    id: i64,
+    job_id: String,
+    stream: String,
+    message: String,
+    created_at: String,
+}
+
+fn row_to_log(row: ConversionJobLogRow) -> Result<ConversionJobLog, AppError> {
+    let job_uuid = row
+        .job_id
+        .parse()
+        .map_err(|e| AppError::Validation(format!("invalid log job id: {e}")))?;
+    let created_at = DateTime::parse_from_rfc3339(&row.created_at)
+        .map_err(|e| AppError::Validation(format!("invalid log created_at: {e}")))?
+        .to_utc();
+
+    Ok(ConversionJobLog {
+        id: row.id,
+        job_id: JobId(job_uuid),
+        stream: row.stream,
+        message: row.message,
+        created_at,
+    })
+}
+
+/// Appends a batch of container log lines for a conversion job.
+#[instrument(skip(pool, logs), fields(job_id = %job_id, count = logs.len()))]
+pub async fn append_job_logs_batch(
+    pool: &DbPool,
+    job_id: &JobId,
+    logs: &[NewJobLog],
+) -> Result<(), AppError> {
+    if logs.is_empty() {
+        return Ok(());
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut tx = pool.begin().await?;
+
+    for log in logs {
+        sqlx::query(
+            "INSERT INTO conversion_job_logs (job_id, stream, message, created_at) \
+             VALUES (?, ?, ?, ?)",
+        )
+        .bind(job_id.to_string())
+        .bind(&log.stream)
+        .bind(&log.message)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+    tracing::debug!(count = logs.len(), "job logs appended");
+    Ok(())
+}
+
+/// Lists the most recent persisted logs for a job in chronological order.
+#[instrument(skip(pool), fields(job_id = %job_id, limit))]
+pub async fn list_job_logs(
+    pool: &DbPool,
+    job_id: &JobId,
+    limit: u32,
+) -> Result<Vec<ConversionJobLog>, AppError> {
+    let rows = sqlx::query_as::<_, ConversionJobLogRow>(
+        "SELECT id, job_id, stream, message, created_at \
+         FROM conversion_job_logs \
+         WHERE job_id = ? \
+         ORDER BY id DESC \
+         LIMIT ?",
+    )
+    .bind(job_id.to_string())
+    .bind(i64::from(limit))
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter().rev().map(row_to_log).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_job() -> ConversionJob {
+        let now = chrono::Utc::now();
+        ConversionJob {
+            id: JobId::new(),
+            model_name: "resnet".to_string(),
+            model_version: 1,
+            model_format: ModelFormat::Onnx,
+            image_tag: "nvcr.io/nvidia/tensorrt:24.08-py3".to_string(),
+            gpu_id: GpuId(0),
+            trt_options: TrtOptions::default(),
+            status: JobStatus::Pending,
+            progress_percent: 0,
+            output_path: None,
+            error_message: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
 
     #[tokio::test]
     async fn init_db_creates_missing_parent_directory() {
@@ -257,5 +396,65 @@ mod tests {
         pool.close().await;
 
         assert!(db_path.exists());
+    }
+
+    #[tokio::test]
+    async fn log_rows_insert_and_list_in_chronological_order() {
+        let pool = init_db("sqlite::memory:").await.expect("database init");
+        let job = sample_job();
+        insert_job(&pool, &job).await.expect("insert job");
+
+        append_job_logs_batch(
+            &pool,
+            &job.id,
+            &[
+                NewJobLog::new("stdout", "first"),
+                NewJobLog::new("stderr", "second"),
+                NewJobLog::new("stdout", "third"),
+            ],
+        )
+        .await
+        .expect("insert logs");
+
+        let logs = list_job_logs(&pool, &job.id, 2).await.expect("list logs");
+        let messages: Vec<_> = logs.iter().map(|log| log.message.as_str()).collect();
+
+        assert_eq!(messages, vec!["second", "third"]);
+        assert_eq!(logs[0].stream, "stderr");
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn logs_remain_queryable_after_job_completion() {
+        let pool = init_db("sqlite::memory:").await.expect("database init");
+        let job = sample_job();
+        insert_job(&pool, &job).await.expect("insert job");
+        append_job_logs_batch(&pool, &job.id, &[NewJobLog::new("stdout", "done")])
+            .await
+            .expect("insert log");
+
+        update_job_completed(&pool, &job.id, std::path::Path::new("/tmp/model"))
+            .await
+            .expect("complete job");
+
+        let logs = list_job_logs(&pool, &job.id, 100).await.expect("list logs");
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].message, "done");
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn migration_creates_conversion_job_logs_table() {
+        let pool = init_db("sqlite::memory:").await.expect("database init");
+        let table_count: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM sqlite_master \
+             WHERE type = 'table' AND name = 'conversion_job_logs'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("table lookup");
+
+        assert_eq!(table_count.0, 1);
+        pool.close().await;
     }
 }
