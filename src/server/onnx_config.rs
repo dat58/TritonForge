@@ -176,8 +176,16 @@ fn parse_dim(dim: &[u8]) -> i64 {
 }
 
 fn format_dims(dims: &[i64]) -> String {
-    let values: Vec<String> = dims.iter().map(ToString::to_string).collect();
+    let values: Vec<String> = triton_dims(dims).iter().map(ToString::to_string).collect();
     format!("[ {} ]", values.join(", "))
+}
+
+fn triton_dims(dims: &[i64]) -> &[i64] {
+    if dims.first() == Some(&-1) {
+        &dims[1..]
+    } else {
+        dims
+    }
 }
 
 fn onnx_elem_type_to_triton(elem_type: u64) -> Result<String, AppError> {
@@ -295,6 +303,39 @@ mod tests {
 
     #[test]
     fn formats_dynamic_dims() {
-        assert_eq!(format_dims(&[-1, 3, 224, 224]), "[ -1, 3, 224, 224 ]");
+        assert_eq!(format_dims(&[-1, 224, 224, 3]), "[ 224, 224, 3 ]");
+    }
+
+    #[test]
+    fn keeps_unbatched_dims() {
+        assert_eq!(format_dims(&[224, 224, 3]), "[ 224, 224, 3 ]");
+    }
+
+    #[test]
+    fn keeps_non_leading_dynamic_dims() {
+        assert_eq!(format_dims(&[-1, 224, -1, 3]), "[ 224, -1, 3 ]");
+    }
+
+    #[test]
+    fn renders_template_with_triton_dims() {
+        let metadata = OnnxMetadata {
+            input: TensorMetadata {
+                name: "images".to_string(),
+                triton_type: "TYPE_FP32".to_string(),
+                dims: vec![-1, 224, 224, 3],
+            },
+            output: TensorMetadata {
+                name: "scores".to_string(),
+                triton_type: "TYPE_FP32".to_string(),
+                dims: vec![-1, 1000],
+            },
+        };
+        let template =
+            "name: \"$MODEL_NAME\"\ninput: $INPUT_DIMENTIONS\noutput: $OUTPUT_DIMENSIONS";
+
+        let rendered = fill_template(template, "resnet", &metadata).expect("render template");
+
+        assert!(rendered.contains("input: [ 224, 224, 3 ]"));
+        assert!(rendered.contains("output: [ 1000 ]"));
     }
 }
