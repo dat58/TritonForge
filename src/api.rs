@@ -9,7 +9,7 @@ use dioxus::prelude::*;
 
 // Shared types used in the function signatures (compiled on all targets).
 use crate::models::config::{GpuInfo, TensorRtImage};
-use crate::models::job::{ConversionJob, JobId, ModelFormat};
+use crate::models::job::{ConversionJob, JobId, ModelFormat, SubmitJobRequest, TrtOptions};
 use crate::models::template::ConfigTemplate;
 
 // ---------------------------------------------------------------------------
@@ -79,6 +79,7 @@ fn build_new_job(
     image_tag: String,
     gpu_id: GpuId,
     template_name: String,
+    trt_options: TrtOptions,
 ) -> ConversionJob {
     let now = chrono::Utc::now();
     ConversionJob {
@@ -88,6 +89,7 @@ fn build_new_job(
         image_tag,
         gpu_id,
         template_name,
+        trt_options,
         status: crate::models::job::JobStatus::Pending,
         progress_percent: 0,
         output_path: None,
@@ -183,32 +185,54 @@ pub async fn get_available_templates() -> Result<Vec<ConfigTemplate>, ServerFnEr
 ///
 /// Returns the newly created `JobId` for progress polling.
 #[server]
-#[tracing::instrument(skip_all, fields(model_name, image_tag))]
+#[tracing::instrument(skip_all, fields(model_name = %req.model_name, image_tag = %req.image_tag))]
 pub async fn submit_job(
     model_data: Vec<u8>,
-    model_name: String,
-    model_format: ModelFormat,
-    image_tag: String,
-    gpu_id: u32,
-    template_name: String,
-    server_output_path: Option<String>,
+    req: SubmitJobRequest,
 ) -> Result<JobId, ServerFnError> {
     let pool = db_pool().await.map_err(to_server_err)?;
     let docker = docker_service().await.map_err(to_server_err)?;
     let storage = storage_service();
 
-    let filename = format!("{model_name}.{}", model_ext(&model_format));
+    // Resource check: free GPU memory must be > 1.4 * workspace_mb
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use crate::server::gpu::GpuService;
+        let gpu_svc = GpuService::new();
+        let gpus = gpu_svc.detect_gpus().await;
+        let selected_gpu = gpus.iter().find(|g| g.id == GpuId(req.gpu_id));
+        
+        match selected_gpu {
+            Some(gpu) => {
+                let required_mb = (req.trt_options.workspace_mb as f64 * 1.4) as u64;
+                if gpu.memory_free_mb < required_mb {
+                    return Err(to_server_err(AppError::Validation(format!(
+                        "Insufficient GPU memory: {} MB free, but {} MB required (1.4 * workspace)",
+                        gpu.memory_free_mb, required_mb
+                    ))));
+                }
+            }
+            None => {
+                return Err(to_server_err(AppError::Validation(format!(
+                    "GPU device {} not found", req.gpu_id
+                ))));
+            }
+        }
+    }
+
+    let filename = format!("{}.{}", req.model_name, model_ext(&req.model_format));
     let (model_path, _) = storage
         .save_upload(&filename, &model_data)
         .await
         .map_err(to_server_err)?;
 
     let job = build_new_job(
-        model_name,
-        model_format,
-        image_tag,
-        GpuId(gpu_id),
-        template_name,
+        req.model_name,
+        req.model_format,
+        req.image_tag,
+        GpuId(req.gpu_id),
+        req.template_name,
+        req.trt_options,
     );
     let job_id = job.id.clone();
 
@@ -227,7 +251,7 @@ pub async fn submit_job(
 
     use {crate::server::conversion::ConversionService, std::sync::Arc};
     let pool_arc = Arc::new(pool.clone());
-    let server_path = server_output_path.map(std::path::PathBuf::from);
+    let server_path = req.server_output_path.map(std::path::PathBuf::from);
     let docker_clone = docker.clone();
 
     tokio::spawn(async move {
@@ -315,8 +339,8 @@ pub async fn cancel_job(job_id: String) -> Result<(), ServerFnError> {
                 bollard::query_parameters::StopContainerOptionsBuilder::default()
                     .t(5)
                     .build(),
-            ),
-        )
+                ),
+            )
         .await
     {
         Ok(())
