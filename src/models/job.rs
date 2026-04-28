@@ -33,8 +33,6 @@ impl std::fmt::Display for JobId {
 pub enum ModelFormat {
     /// ONNX open neural network exchange format.
     Onnx,
-    /// TensorFlow SavedModel directory format.
-    TensorFlowSavedModel,
 }
 
 /// Lifecycle states for a conversion job.
@@ -61,21 +59,21 @@ pub struct ConversionJob {
     pub id: JobId,
     /// Human-readable model name used for output directory naming.
     pub model_name: String,
+    /// Triton model version directory name.
+    pub model_version: u32,
     /// Source model format.
     pub model_format: ModelFormat,
     /// Docker image tag for the TensorRT container.
     pub image_tag: String,
     /// GPU device index to run conversion on.
     pub gpu_id: GpuId,
-    /// Name of the config.pbtxt template to apply.
-    pub template_name: String,
     /// TensorRT conversion options.
     pub trt_options: TrtOptions,
     /// Current lifecycle state.
     pub status: JobStatus,
     /// Conversion progress from 0 to 100.
     pub progress_percent: u8,
-    /// Path to the completed TRT engine file, if available.
+    /// Path to the completed Triton model directory, if available.
     pub output_path: Option<PathBuf>,
     /// Human-readable error description when status is `Failed`.
     pub error_message: Option<String>,
@@ -83,6 +81,21 @@ pub struct ConversionJob {
     pub created_at: DateTime<Utc>,
     /// Timestamp of the last status update.
     pub updated_at: DateTime<Utc>,
+}
+
+/// One persisted stdout/stderr line emitted by a conversion container.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversionJobLog {
+    /// Monotonic row identifier for stable ordering.
+    pub id: i64,
+    /// Conversion job that produced the log line.
+    pub job_id: JobId,
+    /// Container stream name, usually `stdout` or `stderr`.
+    pub stream: String,
+    /// Log line text without Docker multiplexing metadata.
+    pub message: String,
+    /// Timestamp when the log row was persisted.
+    pub created_at: DateTime<Utc>,
 }
 
 /// TensorRT conversion options for trtexec.
@@ -125,11 +138,9 @@ impl Default for TrtOptions {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SubmitJobRequest {
     pub model_name: String,
-    pub model_format: ModelFormat,
+    pub model_version: u32,
     pub image_tag: String,
     pub gpu_id: u32,
-    pub template_name: String,
-    pub server_output_path: Option<String>,
     pub trt_options: TrtOptions,
 }
 
@@ -140,7 +151,6 @@ impl std::fmt::Display for ModelFormat {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Onnx => write!(f, "onnx"),
-            Self::TensorFlowSavedModel => write!(f, "tensorflow_saved_model"),
         }
     }
 }
@@ -151,7 +161,6 @@ impl std::str::FromStr for ModelFormat {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "onnx" => Ok(Self::Onnx),
-            "tensorflow_saved_model" => Ok(Self::TensorFlowSavedModel),
             other => Err(crate::errors::AppError::Validation(format!(
                 "unknown model format: {other}"
             ))),
