@@ -2,9 +2,9 @@
 
 use crate::api::submit_job;
 use crate::app::Route;
-use crate::components::{GpuSelector, ImageSelector, TemplateSelector};
+use crate::components::{GpuSelector, ImageSelector};
 use crate::models::config::GpuId;
-use crate::models::job::{ModelFormat, SubmitJobRequest, TrtOptions};
+use crate::models::job::{SubmitJobRequest, TrtOptions};
 use dioxus::prelude::*;
 
 /// Main upload form for submitting a new TensorRT conversion job.
@@ -15,11 +15,10 @@ pub fn UploadForm() -> Element {
     let mut file_size: Signal<Option<u64>> = use_signal(|| None);
     let mut file_load_progress: Signal<Option<u8>> = use_signal(|| None);
     let mut file_load_error: Signal<Option<String>> = use_signal(|| None);
-    let mut model_format: Signal<Option<ModelFormat>> = use_signal(|| None);
+    let mut model_name = use_signal(String::new);
+    let mut model_version = use_signal(|| 1u32);
     let mut selected_gpu: Signal<Option<GpuId>> = use_signal(|| None);
     let mut selected_image: Signal<Option<String>> = use_signal(|| None);
-    let mut selected_template: Signal<Option<String>> = use_signal(|| None);
-    let mut server_output_path = use_signal(String::new);
     let mut submitting = use_signal(|| false);
     let mut error_msg: Signal<Option<String>> = use_signal(|| None);
 
@@ -36,10 +35,10 @@ pub fn UploadForm() -> Element {
     let nav = use_navigator();
 
     let can_submit = file_bytes.read().is_some()
-        && model_format.read().is_some()
+        && !model_name.read().trim().is_empty()
+        && *model_version.read() > 0
         && selected_gpu.read().is_some()
-        && selected_image.read().is_some()
-        && selected_template.read().is_some();
+        && selected_image.read().is_some();
 
     rsx! {
         div { class: "flex flex-col gap-7",
@@ -59,7 +58,7 @@ pub fn UploadForm() -> Element {
                     input {
                         r#type: "file",
                         class: "hidden",
-                        accept: ".onnx,.pb,.savedmodel",
+                        accept: ".onnx",
                         onchange: move |evt| {
                             let data = evt.data();
                             let files = data.files();
@@ -73,12 +72,7 @@ pub fn UploadForm() -> Element {
                                 file_name.set(name.clone());
                                 file_size.set(Some(size));
                                 file_load_progress.set(Some(0));
-
-                                // Auto-detect model format from file extension
-                                let detected = detect_format(&name);
-                                if detected.is_some() {
-                                    model_format.set(detected);
-                                }
+                                model_name.set(strip_onnx_extension(&name));
 
                                 match read_selected_file(file, file_load_progress).await {
                                     Ok(bytes) => {
@@ -130,7 +124,7 @@ pub fn UploadForm() -> Element {
                                 span { class: "text-slate-400 text-xl group-hover:text-cyan-400 transition-colors", "↑" }
                             }
                             span { class: "text-slate-300 text-sm font-medium", "Click to select model file" }
-                            span { class: "text-slate-600 text-xs", ".onnx  ·  .pb  ·  .savedmodel" }
+                            span { class: "text-slate-600 text-xs", ".onnx" }
                         }
                     }
                 }
@@ -141,34 +135,33 @@ pub fn UploadForm() -> Element {
                 }
             }
 
-            // ── Model format ─────────────────────────────────────────────
-            div { class: "flex flex-col gap-2",
-                div { class: "flex items-center justify-between",
+            // ── Model identity ───────────────────────────────────────────
+            div { class: "grid grid-cols-1 sm:grid-cols-3 gap-4",
+                div { class: "flex flex-col gap-1.5 sm:col-span-2",
                     label { class: "text-xs font-semibold uppercase tracking-wider text-slate-400",
-                        "Model Format"
+                        "Model Name"
                     }
-                    if model_format.read().is_some() {
-                        span { class: "text-xs text-teal-400", "auto-detected ✓" }
+                    input {
+                        r#type: "text",
+                        class: "field",
+                        placeholder: "resnet50",
+                        value: "{model_name}",
+                        oninput: move |evt| model_name.set(evt.value()),
                     }
                 }
-                div { class: "flex gap-3",
-                    for (lbl, fmt) in [
-                        ("ONNX", ModelFormat::Onnx),
-                        ("TF SavedModel", ModelFormat::TensorFlowSavedModel),
-                    ] {
-                        button {
-                            r#type: "button",
-                            class: "flex items-center gap-2.5 cursor-pointer px-4 py-2.5 rounded-lg border transition-all duration-200",
-                            style: if *model_format.read() == Some(fmt.clone()) {
-                                "border-color: #0891b2; background: rgba(8,145,178,0.1); color: #67e8f9;"
-                            } else {
-                                "border-color: #334155; background: rgba(30,41,59,0.4); color: #94a3b8;"
-                            },
-                            onclick: {
-                                let fmt_click = fmt.clone();
-                                move |_| model_format.set(Some(fmt_click.clone()))
-                            },
-                            span { class: "text-sm font-medium", "{lbl}" }
+                div { class: "flex flex-col gap-1.5",
+                    label { class: "text-xs font-semibold uppercase tracking-wider text-slate-400",
+                        "Version"
+                    }
+                    input {
+                        r#type: "number",
+                        class: "field",
+                        min: "1",
+                        value: "{model_version}",
+                        oninput: move |evt| {
+                            if let Ok(value) = evt.value().parse::<u32>() {
+                                model_version.set(value.max(1));
+                            }
                         }
                     }
                 }
@@ -186,27 +179,6 @@ pub fn UploadForm() -> Element {
                 ImageSelector {
                     on_select: move |i| selected_image.set(i),
                     selected_image: selected_image.read().clone(),
-                }
-                div { class: "border-t border-slate-800/60" }
-                TemplateSelector {
-                    on_select: move |t| selected_template.set(t),
-                    selected_template: selected_template.read().clone(),
-                    model_format: model_format.read().clone(),
-                }
-            }
-
-            // ── Optional server path ─────────────────────────────────────
-            div { class: "flex flex-col gap-1.5",
-                label { class: "text-xs font-semibold uppercase tracking-wider text-slate-400",
-                    "Server Output Path "
-                    span { class: "normal-case font-normal text-slate-600", "(optional)" }
-                }
-                input {
-                    r#type: "text",
-                    class: "field",
-                    placeholder: "/data/models/my_model",
-                    value: "{server_output_path}",
-                    oninput: move |evt| server_output_path.set(evt.value()),
                 }
             }
 
@@ -319,10 +291,10 @@ pub fn UploadForm() -> Element {
             div { class: "grid grid-cols-2 gap-2 text-xs",
                 for (done, lbl) in [
                     (file_bytes.read().is_some(),        "Model file"),
-                    (model_format.read().is_some(),      "Format"),
+                    (!model_name.read().trim().is_empty(), "Model name"),
+                    (*model_version.read() > 0,          "Version"),
                     (selected_gpu.read().is_some(),      "GPU"),
                     (selected_image.read().is_some(),    "Image"),
-                    (selected_template.read().is_some(), "Template"),
                 ] {
                     div { class: "flex items-center gap-1.5",
                         span {
@@ -345,13 +317,10 @@ pub fn UploadForm() -> Element {
                 onclick: move |_| {
                     if !can_submit || *submitting.read() { return; }
                     let Some(bytes) = file_bytes.read().clone() else { return; };
-                    let name = strip_extension(file_name.read().as_str());
-                    let Some(fmt) = model_format.read().clone() else { return; };
+                    let name = model_name.read().trim().to_owned();
+                    let version = *model_version.read();
                     let Some(gpu) = *selected_gpu.read() else { return; };
                     let Some(img) = selected_image.read().clone() else { return; };
-                    let Some(tmpl) = selected_template.read().clone() else { return; };
-                    let path = server_output_path.read().clone();
-                    let path_opt = if path.trim().is_empty() { None } else { Some(path) };
 
                     let trt_opts = TrtOptions {
                         explicit_batch: *explicit_batch.read(),
@@ -366,11 +335,9 @@ pub fn UploadForm() -> Element {
 
                     let req = SubmitJobRequest {
                         model_name: name,
-                        model_format: fmt,
+                        model_version: version,
                         image_tag: img,
                         gpu_id: gpu.0,
-                        template_name: tmpl,
-                        server_output_path: path_opt,
                         trt_options: trt_opts,
                     };
 
@@ -410,15 +377,6 @@ async fn read_selected_file(
     file.read_bytes().await.map(|bytes| bytes.to_vec())
 }
 
-fn detect_format(name: &str) -> Option<ModelFormat> {
-    let ext = name.rsplit('.').next()?.to_lowercase();
-    match ext.as_str() {
-        "onnx" => Some(ModelFormat::Onnx),
-        "pb" | "savedmodel" => Some(ModelFormat::TensorFlowSavedModel),
-        _ => None,
-    }
-}
-
 fn format_file_size(bytes: u64) -> String {
     if bytes >= 1024 * 1024 {
         format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
@@ -427,11 +385,8 @@ fn format_file_size(bytes: u64) -> String {
     }
 }
 
-fn strip_extension(name: &str) -> String {
-    let stripped = name
-        .trim_end_matches(".onnx")
-        .trim_end_matches(".pb")
-        .trim_end_matches(".savedmodel");
+fn strip_onnx_extension(name: &str) -> String {
+    let stripped = name.trim_end_matches(".onnx");
     if stripped.is_empty() {
         name.to_owned()
     } else {

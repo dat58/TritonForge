@@ -23,7 +23,7 @@ pub fn HomePage() -> Element {
                         "New Conversion Job"
                     }
                     p { class: "text-slate-500 text-sm max-w-sm mx-auto",
-                        "Upload your model and configure conversion settings. The engine will be built inside a Docker container."
+                        "Upload an ONNX model and configure conversion settings. The engine will be built inside a Docker container."
                     }
                 }
 

@@ -6,9 +6,6 @@ const MAX_SIZE_BYTES: u64 = MAX_SIZE_MB * 1024 * 1024;
 fn allowed_extension(filename: &str) -> bool {
     let lower = filename.to_lowercase();
     lower.ends_with(".onnx")
-        || lower.ends_with(".pb")
-        || lower.ends_with(".savedmodel")
-        || lower.ends_with(".pbtxt")
 }
 
 fn within_size_limit(bytes: u64) -> bool {
@@ -22,9 +19,9 @@ fn valid_onnx_extension_accepted() {
 }
 
 #[test]
-fn valid_tf_extensions_accepted() {
-    assert!(allowed_extension("model.pb"));
-    assert!(allowed_extension("saved.savedmodel"));
+fn tensorflow_extensions_rejected() {
+    assert!(!allowed_extension("model.pb"));
+    assert!(!allowed_extension("saved.savedmodel"));
 }
 
 #[test]
