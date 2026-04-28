@@ -1,0 +1,33 @@
+name: "$MODEL_NAME"
+platform: "tensorrt_plan"
+
+instance_group [
+  {
+    count: 1
+    kind: KIND_GPU
+  }
+]
+
+#dynamic_batching {
+#  preferred_batch_size: [ 4, 8 ]
+#  max_queue_delay_microseconds: 100
+#}
+
+#max_batch_size: 8
+
+
+input [
+  {
+    name: "$INPUT_NAME"
+    data_type: $INPUT_DATA_TYPE
+    dims: $INPUT_DIMENTIONS
+  }
+]
+
+output [
+  {
+    name: "$OUTPUT_NAME"
+    data_type: $OUTPUT_DATA_TYPE
+    dims: $OUTPUT_DIMENTIONS
+  }
+]
