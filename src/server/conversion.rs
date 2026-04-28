@@ -2,17 +2,18 @@
 
 use crate::errors::AppError;
 use crate::models::config::AppConfig;
-use crate::models::job::{ConversionJob, JobId, JobStatus, ModelFormat, TrtOptions};
+use crate::models::job::{ConversionJob, JobId, JobStatus, TrtOptions};
 use crate::server::db::{self, DbPool};
 use crate::server::docker::DockerService;
+use crate::server::onnx_config::generate_config_pbtxt;
 use crate::server::storage::StorageService;
+use bollard::container::LogOutput;
 use bollard::models::{ContainerCreateBody, DeviceRequest, HostConfig};
 use bollard::query_parameters::{LogsOptionsBuilder, RemoveContainerOptionsBuilder};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::mpsc;
+use std::time::{Duration, Instant};
 use tokio_stream::StreamExt;
 use tracing::{Instrument, instrument};
 
@@ -31,6 +32,10 @@ const PROGRESS_MILESTONES: &[(&str, u8)] = &[
     ("Serializing engine", 80),
     ("Inference averag", 90),
 ];
+
+const LOG_BATCH_SIZE: usize = 25;
+const LOG_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
+const LOG_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Orchestrates the full Docker-based model conversion lifecycle.
 pub struct ConversionService {
@@ -112,7 +117,7 @@ impl ConversionService {
             format!("{}:{CONTAINER_OUTPUT_DIR}", temp_output_dir.display()),
         ];
 
-        let cmd = build_trtexec_cmd(&job.model_format, container_model_path, &job.trt_options);
+        let cmd = build_trtexec_cmd(container_model_path, &job.trt_options);
         let container_id = self
             .create_and_start_container(job, container_name, binds, cmd)
             .await?;
@@ -132,7 +137,7 @@ impl ConversionService {
             .await;
 
         match exit_code? {
-            0 => self.finalise_job(job, temp_output_dir).await,
+            0 => self.finalise_job(job, model_path, temp_output_dir).await,
             code => {
                 let msg = format!("container exited with code {code}");
                 db::update_job_failed(&self.pool, &job.id, &msg).await?;
@@ -205,9 +210,6 @@ impl ConversionService {
         container_id: &str,
         span: tracing::Span,
     ) -> Result<i64, AppError> {
-        let (progress_tx, mut progress_rx) = mpsc::channel::<u8>(16);
-
-        // Spawn log streaming in a separate task.
         let pool_clone = Arc::clone(&self.pool);
         let job_id = job.id.clone();
         let docker_clone = self.docker.clone();
@@ -215,7 +217,7 @@ impl ConversionService {
 
         let log_task = tokio::spawn(
             async move {
-                stream_container_logs(&docker_clone, &cid, &job_id, &pool_clone, progress_tx).await;
+                stream_container_logs(&docker_clone, &cid, &job_id, &pool_clone).await;
             }
             .instrument(span.clone()),
         );
@@ -233,9 +235,11 @@ impl ConversionService {
         )
         .await;
 
-        log_task.abort();
-        // Drain remaining progress updates.
-        while progress_rx.try_recv().is_ok() {}
+        if wait_result.is_err() {
+            log_task.abort();
+        } else {
+            drain_log_task(log_task).await;
+        }
 
         match wait_result {
             Ok(Some(Ok(response))) => Ok(response.status_code),
@@ -255,18 +259,26 @@ impl ConversionService {
     async fn finalise_job(
         &self,
         job: &ConversionJob,
+        model_path: &Path,
         temp_output_dir: &Path,
     ) -> Result<PathBuf, AppError> {
         db::update_job_status(&self.pool, &job.id, JobStatus::Finalizing, 95).await?;
 
-        let engine_path = find_engine_file(temp_output_dir).await?;
-        let final_path = self
+        let plan_path = find_plan_file(temp_output_dir).await?;
+        let config_pbtxt = generate_config_pbtxt(model_path, &job.model_name).await?;
+        let model_dir = self
             .storage
-            .move_to_output(&engine_path, &job.id, &job.model_name)
+            .move_to_output(
+                &plan_path,
+                &job.id,
+                &job.model_name,
+                job.model_version,
+                &config_pbtxt,
+            )
             .await?;
 
-        db::update_job_completed(&self.pool, &job.id, &final_path).await?;
-        Ok(final_path)
+        db::update_job_completed(&self.pool, &job.id, &model_dir).await?;
+        Ok(model_dir)
     }
 }
 
@@ -275,7 +287,6 @@ async fn stream_container_logs(
     container_id: &str,
     job_id: &JobId,
     pool: &DbPool,
-    progress_tx: mpsc::Sender<u8>,
 ) {
     let options = LogsOptionsBuilder::default()
         .follow(true)
@@ -284,24 +295,155 @@ async fn stream_container_logs(
         .build();
 
     let mut stream = docker.client().logs(container_id, Some(options));
+    let mut batch = LogBatch::new();
+    let mut progress = ProgressTracker::new(5);
 
     while let Some(result) = stream.next().await {
         match result {
             Ok(output) => {
-                let line = output.to_string();
-                tracing::trace!(line = %line.trim(), "container log");
-
-                if let Some(progress) = parse_progress(&line) {
-                    let _ =
-                        db::update_job_status(pool, job_id, JobStatus::Converting, progress).await;
-                    let _ = progress_tx.try_send(progress);
-                }
+                persist_log_output(pool, job_id, &mut batch, &mut progress, output).await;
             }
             Err(e) => {
                 tracing::warn!(error = ?e, "log stream error");
                 break;
             }
         }
+    }
+
+    batch.flush(pool, job_id).await;
+}
+
+async fn drain_log_task(mut log_task: tokio::task::JoinHandle<()>) {
+    tokio::select! {
+        result = &mut log_task => match result {
+            Ok(()) => {}
+            Err(e) => {
+                tracing::warn!(error = ?e, "log stream task failed");
+            }
+        },
+        () = tokio::time::sleep(LOG_DRAIN_TIMEOUT) => {
+            log_task.abort();
+            tracing::warn!(
+                timeout_secs = LOG_DRAIN_TIMEOUT.as_secs(),
+                "timed out draining container logs"
+            );
+        }
+    }
+}
+
+async fn persist_log_output(
+    pool: &DbPool,
+    job_id: &JobId,
+    batch: &mut LogBatch,
+    progress: &mut ProgressTracker,
+    output: LogOutput,
+) {
+    let stream_name = log_stream_name(&output);
+    let text = output.to_string();
+
+    for line in log_lines(&text) {
+        tracing::trace!(stream = stream_name, line = %line.trim(), "container log");
+        batch.push(db::NewJobLog::new(stream_name, line));
+        update_progress_from_line(pool, job_id, progress, line).await;
+
+        if batch.should_flush() {
+            batch.flush(pool, job_id).await;
+        }
+    }
+}
+
+async fn update_progress_from_line(
+    pool: &DbPool,
+    job_id: &JobId,
+    progress: &mut ProgressTracker,
+    line: &str,
+) {
+    let Some(next_progress) = progress.next_update(parse_progress(line)) else {
+        return;
+    };
+
+    if let Err(e) = db::update_job_status(pool, job_id, JobStatus::Converting, next_progress).await
+    {
+        tracing::warn!(
+            error = ?e,
+            progress = next_progress,
+            "failed to persist conversion progress"
+        );
+    }
+}
+
+fn log_stream_name(output: &LogOutput) -> &'static str {
+    match output {
+        LogOutput::StdErr { .. } => "stderr",
+        LogOutput::StdOut { .. } => "stdout",
+        LogOutput::StdIn { .. } => "stdin",
+        LogOutput::Console { .. } => "console",
+    }
+}
+
+fn log_lines(text: &str) -> Vec<&str> {
+    text.lines().collect()
+}
+
+struct LogBatch {
+    logs: Vec<db::NewJobLog>,
+    last_flush: Instant,
+}
+
+impl LogBatch {
+    fn new() -> Self {
+        Self {
+            logs: Vec::with_capacity(LOG_BATCH_SIZE),
+            last_flush: Instant::now(),
+        }
+    }
+
+    fn push(&mut self, log: db::NewJobLog) {
+        self.logs.push(log);
+    }
+
+    fn should_flush(&self) -> bool {
+        self.logs.len() >= LOG_BATCH_SIZE || self.last_flush.elapsed() >= LOG_FLUSH_INTERVAL
+    }
+
+    async fn flush(&mut self, pool: &DbPool, job_id: &JobId) {
+        if self.logs.is_empty() {
+            return;
+        }
+
+        if let Err(e) = db::append_job_logs_batch(pool, job_id, &self.logs).await {
+            tracing::warn!(
+                error = ?e,
+                count = self.logs.len(),
+                "failed to persist container logs"
+            );
+        }
+
+        self.logs.clear();
+        self.last_flush = Instant::now();
+    }
+}
+
+#[derive(Debug)]
+struct ProgressTracker {
+    last_progress: u8,
+}
+
+impl ProgressTracker {
+    fn new(initial_progress: u8) -> Self {
+        Self {
+            last_progress: initial_progress,
+        }
+    }
+
+    fn next_update(&mut self, candidate: Option<u8>) -> Option<u8> {
+        let next_progress = candidate?;
+        if next_progress <= self.last_progress {
+            return None;
+        }
+
+        self.last_progress = next_progress;
+        Some(next_progress)
     }
 }
 
@@ -312,21 +454,11 @@ fn parse_progress(line: &str) -> Option<u8> {
         .map(|(_, pct)| *pct)
 }
 
-fn build_trtexec_cmd(
-    format: &ModelFormat,
-    container_model_path: &str,
-    options: &TrtOptions,
-) -> Vec<String> {
+fn build_trtexec_cmd(container_model_path: &str, options: &TrtOptions) -> Vec<String> {
     let mut cmd = vec!["trtexec".to_string()];
 
-    match format {
-        ModelFormat::Onnx => cmd.push(format!("--onnx={container_model_path}")),
-        ModelFormat::TensorFlowSavedModel => {
-            cmd.push(format!("--savedModel={container_model_path}"))
-        }
-    }
-
-    cmd.push(format!("--saveEngine={CONTAINER_OUTPUT_DIR}/model.engine"));
+    cmd.push(format!("--onnx={container_model_path}"));
+    cmd.push(format!("--saveEngine={CONTAINER_OUTPUT_DIR}/model.plan"));
 
     if options.explicit_batch {
         cmd.push("--explicitBatch".to_string());
@@ -353,16 +485,40 @@ fn build_trtexec_cmd(
     cmd
 }
 
-async fn find_engine_file(dir: &Path) -> Result<PathBuf, AppError> {
+async fn find_plan_file(dir: &Path) -> Result<PathBuf, AppError> {
     let mut entries = tokio::fs::read_dir(dir).await?;
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("engine") {
+        if path.file_name().and_then(|e| e.to_str()) == Some("model.plan") {
             return Ok(path);
         }
     }
     Err(AppError::Conversion(format!(
-        "no .engine file found in {}",
+        "no model.plan file found in {}",
         dir.display()
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn progress_tracker_only_accepts_increases() {
+        let mut tracker = ProgressTracker::new(5);
+
+        assert_eq!(tracker.next_update(Some(5)), None);
+        assert_eq!(tracker.next_update(Some(20)), Some(20));
+        assert_eq!(tracker.next_update(Some(20)), None);
+        assert_eq!(tracker.next_update(Some(10)), None);
+        assert_eq!(tracker.next_update(Some(70)), Some(70));
+        assert_eq!(tracker.next_update(None), None);
+    }
+
+    #[test]
+    fn parse_progress_uses_known_trtexec_milestones() {
+        assert_eq!(parse_progress("[I] Building engine"), Some(20));
+        assert_eq!(parse_progress("[I] Finished engine building"), Some(70));
+        assert_eq!(parse_progress("[I] Starting conversion"), None);
+    }
 }
