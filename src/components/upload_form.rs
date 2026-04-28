@@ -4,7 +4,7 @@ use crate::api::submit_job;
 use crate::app::Route;
 use crate::components::{GpuSelector, ImageSelector, TemplateSelector};
 use crate::models::config::GpuId;
-use crate::models::job::ModelFormat;
+use crate::models::job::{ModelFormat, SubmitJobRequest, TrtOptions};
 use dioxus::prelude::*;
 
 /// Main upload form for submitting a new TensorRT conversion job.
@@ -20,6 +20,16 @@ pub fn UploadForm() -> Element {
     let mut server_output_path = use_signal(String::new);
     let mut submitting = use_signal(|| false);
     let mut error_msg: Signal<Option<String>> = use_signal(|| None);
+
+    let mut explicit_batch = use_signal(|| true);
+    let min_shapes = use_signal(String::new);
+    let opt_shapes = use_signal(String::new);
+    let max_shapes = use_signal(String::new);
+    let mut workspace_mb = use_signal(|| 4096u32);
+    let mut min_timing = use_signal(|| 8u32);
+    let mut avg_timing = use_signal(|| 16u32);
+    let mut fp16 = use_signal(|| true);
+    let mut show_advanced = use_signal(|| false);
 
     let nav = use_navigator();
 
@@ -174,6 +184,104 @@ pub fn UploadForm() -> Element {
                 }
             }
 
+            // ── Advanced Options Toggle ──────────────────────────────────
+            button {
+                r#type: "button",
+                class: "flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-slate-500 hover:text-slate-300 transition-colors w-max",
+                onclick: move |_| show_advanced.toggle(),
+                span { if *show_advanced.read() { "▼" } else { "▶" } }
+                "Advanced TensorRT Options"
+            }
+
+            if *show_advanced.read() {
+                div { class: "flex flex-col gap-4 p-4 rounded-xl border border-slate-800 bg-slate-900/30",
+                    div { class: "grid grid-cols-2 gap-4",
+                        div { class: "flex flex-col gap-1.5",
+                            label { class: "text-[10px] font-bold uppercase text-slate-500", "Workspace (MiB)" }
+                            input {
+                                r#type: "number",
+                                class: "field text-sm py-1.5",
+                                value: "{workspace_mb}",
+                                oninput: move |evt| {
+                                    if let Ok(val) = evt.value().parse::<u32>() {
+                                        workspace_mb.set(val);
+                                    }
+                                }
+                            }
+                        }
+                        div { class: "flex flex-col gap-1.5",
+                            label { class: "text-[10px] font-bold uppercase text-slate-500", "Precision" }
+                            div { class: "flex items-center gap-4 h-full",
+                                label { class: "flex items-center gap-2 cursor-pointer text-sm text-slate-300",
+                                    input {
+                                        r#type: "checkbox",
+                                        checked: *fp16.read(),
+                                        onchange: move |_| fp16.toggle(),
+                                    }
+                                    "FP16"
+                                }
+                                label { class: "flex items-center gap-2 cursor-pointer text-sm text-slate-300",
+                                    input {
+                                        r#type: "checkbox",
+                                        checked: *explicit_batch.read(),
+                                        onchange: move |_| explicit_batch.toggle(),
+                                    }
+                                    "Explicit Batch"
+                                }
+                            }
+                        }
+                    }
+
+                    div { class: "grid grid-cols-3 gap-3",
+                        for (lbl, mut sig) in [
+                            ("Min Shapes", min_shapes),
+                            ("Opt Shapes", opt_shapes),
+                            ("Max Shapes", max_shapes),
+                        ] {
+                            div { class: "flex flex-col gap-1.5",
+                                label { class: "text-[10px] font-bold uppercase text-slate-500", "{lbl}" }
+                                input {
+                                    r#type: "text",
+                                    class: "field text-xs py-1.5",
+                                    placeholder: "input:1x3x224x224",
+                                    value: "{sig}",
+                                    oninput: move |evt| sig.set(evt.value()),
+                                }
+                            }
+                        }
+                    }
+
+                    div { class: "grid grid-cols-2 gap-4",
+                        div { class: "flex flex-col gap-1.5",
+                            label { class: "text-[10px] font-bold uppercase text-slate-500", "Min Timing" }
+                            input {
+                                r#type: "number",
+                                class: "field text-sm py-1.5",
+                                value: "{min_timing}",
+                                oninput: move |evt| {
+                                    if let Ok(val) = evt.value().parse::<u32>() {
+                                        min_timing.set(val);
+                                    }
+                                }
+                            }
+                        }
+                        div { class: "flex flex-col gap-1.5",
+                            label { class: "text-[10px] font-bold uppercase text-slate-500", "Avg Timing" }
+                            input {
+                                r#type: "number",
+                                class: "field text-sm py-1.5",
+                                value: "{avg_timing}",
+                                oninput: move |evt| {
+                                    if let Ok(val) = evt.value().parse::<u32>() {
+                                        avg_timing.set(val);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // ── Error ─────────────────────────────────────────────────────
             if let Some(ref msg) = *error_msg.read() {
                 div { class: "rounded-lg px-4 py-3 text-rose-400 text-sm border border-rose-800/50 bg-rose-950/30",
@@ -219,11 +327,32 @@ pub fn UploadForm() -> Element {
                     let path = server_output_path.read().clone();
                     let path_opt = if path.trim().is_empty() { None } else { Some(path) };
 
+                    let trt_opts = TrtOptions {
+                        explicit_batch: *explicit_batch.read(),
+                        min_shapes: if min_shapes.read().trim().is_empty() { None } else { Some(min_shapes.read().clone()) },
+                        opt_shapes: if opt_shapes.read().trim().is_empty() { None } else { Some(opt_shapes.read().clone()) },
+                        max_shapes: if max_shapes.read().trim().is_empty() { None } else { Some(max_shapes.read().clone()) },
+                        workspace_mb: *workspace_mb.read(),
+                        min_timing: *min_timing.read(),
+                        avg_timing: *avg_timing.read(),
+                        fp16: *fp16.read(),
+                    };
+
+                    let req = SubmitJobRequest {
+                        model_name: name,
+                        model_format: fmt,
+                        image_tag: img,
+                        gpu_id: gpu.0,
+                        template_name: tmpl,
+                        server_output_path: path_opt,
+                        trt_options: trt_opts,
+                    };
+
                     submitting.set(true);
                     error_msg.set(None);
 
                     spawn(async move {
-                        match submit_job(bytes, name, fmt, img, gpu.0, tmpl, path_opt).await {
+                        match submit_job(bytes, req).await {
                             Ok(job_id) => {
                                 let _ = nav.push(Route::JobDetail { id: job_id.to_string() });
                             }

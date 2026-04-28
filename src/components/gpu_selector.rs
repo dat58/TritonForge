@@ -42,7 +42,7 @@ pub fn GpuSelector(on_select: EventHandler<Option<GpuId>>, selected_gpu: Option<
                             option {
                                 value: "{gpu.id.0}",
                                 selected: selected_gpu == Some(gpu.id),
-                                "GPU {gpu.id.0}  ·  {gpu.name}  ·  {gpu.memory_mb} MB"
+                                "GPU {gpu.id.0}  ·  {gpu.name}  ·  {gpu.memory_free_mb} / {gpu.memory_total_mb} MB free"
                             }
                         }
                     }
