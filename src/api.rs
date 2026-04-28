@@ -10,7 +10,6 @@ use dioxus::prelude::*;
 // Shared types used in the function signatures (compiled on all targets).
 use crate::models::config::{GpuInfo, TensorRtImage};
 use crate::models::job::{ConversionJob, JobId, SubmitJobRequest};
-use crate::models::template::ConfigTemplate;
 
 // ---------------------------------------------------------------------------
 // Server-only imports, state, and helpers
@@ -68,30 +67,22 @@ fn to_server_err(e: AppError) -> ServerFnError {
 }
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
-fn model_ext(format: &ModelFormat) -> &'static str {
-    match format {
-        ModelFormat::Onnx => "onnx",
-        ModelFormat::TensorFlowSavedModel => "savedmodel",
-    }
-}
-
 #[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
 fn build_new_job(
     model_name: String,
-    model_format: ModelFormat,
+    model_version: u32,
     image_tag: String,
     gpu_id: GpuId,
-    template_name: String,
     trt_options: TrtOptions,
 ) -> ConversionJob {
     let now = chrono::Utc::now();
     ConversionJob {
         id: JobId::new(),
         model_name,
-        model_format,
+        model_version,
+        model_format: ModelFormat::Onnx,
         image_tag,
         gpu_id,
-        template_name,
         trt_options,
         status: crate::models::job::JobStatus::Pending,
         progress_percent: 0,
@@ -107,6 +98,33 @@ fn parse_job_id(s: &str) -> Result<JobId, AppError> {
     s.parse::<uuid::Uuid>()
         .map(JobId)
         .map_err(|e| AppError::Validation(format!("invalid job id '{s}': {e}")))
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
+fn validate_submit_request(req: &SubmitJobRequest) -> Result<(), AppError> {
+    validate_model_name(&req.model_name)?;
+    if req.model_version == 0 {
+        return Err(AppError::Validation(
+            "model version must be at least 1".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
+fn validate_model_name(name: &str) -> Result<(), AppError> {
+    let valid = !name.trim().is_empty()
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'));
+
+    if valid {
+        Ok(())
+    } else {
+        Err(AppError::Validation(
+            "model name must contain only letters, numbers, '.', '_', or '-'".into(),
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -210,18 +228,6 @@ pub async fn get_available_gpus() -> Result<Vec<GpuInfo>, ServerFnError> {
     Ok(svc.detect_gpus().await)
 }
 
-/// Returns all `.pbtxt` config templates from the templates directory.
-#[server]
-#[tracing::instrument(skip_all)]
-pub async fn get_available_templates() -> Result<Vec<ConfigTemplate>, ServerFnError> {
-    let dir = std::path::PathBuf::from(
-        std::env::var("TEMPLATES_DIR").unwrap_or_else(|_| "./templates".into()),
-    );
-    crate::models::template::load_templates(&dir)
-        .await
-        .map_err(to_server_err)
-}
-
 /// Saves the uploaded model to disk and schedules a TensorRT conversion job.
 ///
 /// Returns the newly created `JobId` for progress polling.
@@ -231,6 +237,8 @@ pub async fn submit_job(
     model_data: Vec<u8>,
     req: SubmitJobRequest,
 ) -> Result<JobId, ServerFnError> {
+    validate_submit_request(&req).map_err(to_server_err)?;
+
     let pool = db_pool().await.map_err(to_server_err)?;
     let docker = docker_service().await.map_err(to_server_err)?;
     let storage = storage_service();
@@ -268,7 +276,7 @@ pub async fn submit_job(
         }
     }
 
-    let filename = format!("{}.{}", req.model_name, model_ext(&req.model_format));
+    let filename = format!("{}.onnx", req.model_name);
     let (model_path, _) = storage
         .save_upload(&filename, &model_data)
         .await
@@ -276,10 +284,9 @@ pub async fn submit_job(
 
     let job = build_new_job(
         req.model_name,
-        req.model_format,
+        req.model_version,
         req.image_tag,
         GpuId(req.gpu_id),
-        req.template_name,
         req.trt_options,
     );
     let job_id = job.id.clone();
@@ -299,7 +306,6 @@ pub async fn submit_job(
 
     use {crate::server::conversion::ConversionService, std::sync::Arc};
     let pool_arc = Arc::new(pool.clone());
-    let server_path = req.server_output_path.map(std::path::PathBuf::from);
     let docker_clone = docker.clone();
 
     tokio::spawn(async move {
@@ -308,14 +314,7 @@ pub async fn submit_job(
         let conv = ConversionService::new(docker_clone, storage_inner.clone(), pool_arc, config);
 
         match conv.run_conversion(job, model_path).await {
-            Ok(engine_path) => {
-                if let Some(target) = server_path {
-                    let _ = storage_inner
-                        .save_to_server_path(&engine_path, &target)
-                        .await;
-                }
-                tracing::info!("background conversion finished");
-            }
+            Ok(_) => tracing::info!("background conversion finished"),
             Err(e) => {
                 tracing::error!(error = ?e, "background conversion failed");
             }
@@ -344,7 +343,7 @@ pub async fn list_all_jobs(limit: u32, offset: u32) -> Result<Vec<ConversionJob>
         .map_err(to_server_err)
 }
 
-/// Returns the raw engine bytes for a completed job.
+/// Returns a zip archive of the completed Triton model folder.
 #[server(output = Cbor)]
 #[tracing::instrument(skip_all, fields(job_id))]
 pub async fn download_model(job_id: String) -> Result<Vec<u8>, ServerFnError> {
@@ -359,14 +358,35 @@ pub async fn download_model(job_id: String) -> Result<Vec<u8>, ServerFnError> {
     }
 
     let storage = storage_service();
-    let path = storage
-        .get_download_path(&jid)
+    let model_dir = storage
+        .get_model_dir(&jid, &job.model_name)
         .await
         .map_err(to_server_err)?;
 
-    tokio::fs::read(&path)
+    storage
+        .zip_model_dir(&model_dir, &job.model_name)
         .await
-        .map_err(|e| to_server_err(AppError::Io(e)))
+        .map_err(to_server_err)
+}
+
+/// Returns persisted container logs for a conversion job.
+#[server]
+#[tracing::instrument(skip_all, fields(job_id, limit))]
+pub async fn get_job_logs(job_id: String, limit: u32) -> Result<String, ServerFnError> {
+    let pool = db_pool().await.map_err(to_server_err)?;
+    let jid = parse_job_id(&job_id).map_err(to_server_err)?;
+    let capped_limit = limit.clamp(1, 1_000);
+    let rows = db::list_job_logs(pool, &jid, capped_limit)
+        .await
+        .map_err(to_server_err)?;
+    let mut logs = String::new();
+
+    for row in rows {
+        logs.push_str(&row.message);
+        logs.push('\n');
+    }
+
+    Ok(logs)
 }
 
 /// Stops a running conversion job by stopping its Docker container.
