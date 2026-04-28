@@ -4,6 +4,7 @@ use crate::errors::AppError;
 use crate::models::config::GpuId;
 use crate::models::job::{ConversionJob, JobId, JobStatus, ModelFormat, TrtOptions};
 use chrono::DateTime;
+use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{FromRow, SqlitePool};
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -18,13 +19,29 @@ pub type DbPool = SqlitePool;
 /// or the special `sqlite::memory:` for in-memory testing.
 #[instrument(skip_all, fields(database_url))]
 pub async fn init_db(database_url: &str) -> Result<DbPool, AppError> {
-    let pool = SqlitePool::connect(database_url).await?;
+    let options = SqliteConnectOptions::from_str(database_url)?.create_if_missing(true);
+    create_database_parent_dir(options.get_filename()).await?;
+
+    let pool = SqlitePool::connect_with(options).await?;
     sqlx::migrate!()
         .run(&pool)
         .await
         .map_err(|e| AppError::Conversion(format!("migration failed: {e}")))?;
     tracing::info!(database_url, "database pool initialised");
     Ok(pool)
+}
+
+async fn create_database_parent_dir(path: &std::path::Path) -> Result<(), AppError> {
+    if path == std::path::Path::new(":memory:") {
+        return Ok(());
+    }
+
+    let Some(parent) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) else {
+        return Ok(());
+    };
+
+    tokio::fs::create_dir_all(parent).await?;
+    Ok(())
 }
 
 /// Raw row returned by SQLite queries — converted to [`ConversionJob`] before leaving this module.
@@ -224,4 +241,21 @@ pub async fn list_jobs(
     .await?;
 
     rows.into_iter().map(row_to_job).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn init_db_creates_missing_parent_directory() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let db_path = temp_dir.path().join("nested").join("converter.db");
+        let database_url = format!("sqlite://{}", db_path.display());
+
+        let pool = init_db(&database_url).await.expect("database init");
+        pool.close().await;
+
+        assert!(db_path.exists());
+    }
 }
