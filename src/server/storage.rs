@@ -8,7 +8,10 @@ use tokio::fs;
 use tracing::instrument;
 use uuid::Uuid;
 
-const ALLOWED_EXTENSIONS: &[&str] = &["onnx", "pb", "savedmodel"];
+const ALLOWED_EXTENSIONS: &[&str] = &["onnx"];
+const ZIP_LOCAL_FILE_HEADER: u32 = 0x0403_4b50;
+const ZIP_CENTRAL_DIRECTORY_HEADER: u32 = 0x0201_4b50;
+const ZIP_END_OF_CENTRAL_DIRECTORY: u32 = 0x0605_4b50;
 
 /// Manages all on-disk file operations for conversion jobs.
 #[derive(Debug, Clone)]
@@ -69,57 +72,56 @@ impl StorageService {
         Ok((saved_path, file_size))
     }
 
-    /// Moves a completed engine file from temp storage into the output directory.
+    /// Moves a completed plan file into Triton's model repository layout.
     ///
-    /// Output is organised as `output_dir/{job_id}/{model_name}.engine`.
-    #[instrument(skip(self), fields(job_id = %job_id, model_name))]
+    /// Output is organised as `output_dir/{job_id}/{model_name}/{version}/model.plan`.
+    #[instrument(skip(self, config_pbtxt), fields(job_id = %job_id, model_name, model_version))]
     pub async fn move_to_output(
         &self,
         temp_path: &Path,
         job_id: &JobId,
         model_name: &str,
+        model_version: u32,
+        config_pbtxt: &str,
     ) -> Result<PathBuf, AppError> {
-        let job_dir = self.output_dir.join(job_id.to_string());
-        fs::create_dir_all(&job_dir).await?;
+        let model_dir = self.output_dir.join(job_id.to_string()).join(model_name);
+        let version_dir = model_dir.join(model_version.to_string());
+        fs::create_dir_all(&version_dir).await?;
 
-        let dest = job_dir.join(format!("{model_name}.engine"));
-        fs::rename(temp_path, &dest).await?;
+        let plan_path = version_dir.join("model.plan");
+        fs::rename(temp_path, &plan_path).await?;
+        fs::write(model_dir.join("config.pbtxt"), config_pbtxt).await?;
 
-        tracing::info!(dest = %dest.display(), "engine moved to output directory");
-        Ok(dest)
+        tracing::info!(dest = %model_dir.display(), "model moved to output directory");
+        Ok(model_dir)
     }
 
-    /// Copies the completed engine to a user-specified server path.
-    #[instrument(skip(self), fields(target = %target_path.display()))]
-    pub async fn save_to_server_path(
-        &self,
-        source: &Path,
-        target_path: &Path,
-    ) -> Result<PathBuf, AppError> {
-        if let Some(parent) = target_path.parent() {
-            fs::create_dir_all(parent).await?;
-        }
-        fs::copy(source, target_path).await?;
-        tracing::info!(dest = %target_path.display(), "engine copied to server path");
-        Ok(target_path.to_owned())
-    }
-
-    /// Returns the path of the `.engine` file for the given job, if it exists.
+    /// Returns the path of the Triton model directory for the given job.
     #[instrument(skip(self), fields(job_id = %job_id))]
-    pub async fn get_download_path(&self, job_id: &JobId) -> Result<PathBuf, AppError> {
-        let job_dir = self.output_dir.join(job_id.to_string());
-        let mut entries = fs::read_dir(&job_dir).await?;
-
-        while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("engine") {
-                return Ok(path);
-            }
+    pub async fn get_model_dir(
+        &self,
+        job_id: &JobId,
+        model_name: &str,
+    ) -> Result<PathBuf, AppError> {
+        let model_dir = self.output_dir.join(job_id.to_string()).join(model_name);
+        if fs::metadata(&model_dir).await?.is_dir() {
+            return Ok(model_dir);
         }
 
         Err(AppError::Validation(format!(
-            "no engine file found for job {job_id}"
+            "no model directory found for job {job_id}"
         )))
+    }
+
+    /// Returns a zip archive containing the full Triton model directory.
+    #[instrument(skip(self), fields(model_dir = %model_dir.display(), model_name))]
+    pub async fn zip_model_dir(
+        &self,
+        model_dir: &Path,
+        model_name: &str,
+    ) -> Result<Vec<u8>, AppError> {
+        let files = collect_model_files(model_dir, model_name).await?;
+        build_zip(files)
     }
 
     /// Deletes a temporary file, ignoring the error if the file is already gone.
@@ -151,6 +153,178 @@ fn validate_extension(filename: &str) -> Result<(), AppError> {
     }
 }
 
+async fn collect_model_files(
+    model_dir: &Path,
+    model_name: &str,
+) -> Result<Vec<(String, Vec<u8>)>, AppError> {
+    let mut dirs = vec![model_dir.to_owned()];
+    let mut files = Vec::new();
+
+    while let Some(dir) = dirs.pop() {
+        let mut entries = fs::read_dir(&dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            let metadata = entry.metadata().await?;
+            if metadata.is_dir() {
+                dirs.push(path);
+            } else if metadata.is_file() {
+                files.push(read_model_file(model_dir, model_name, &path).await?);
+            }
+        }
+    }
+
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(files)
+}
+
+async fn read_model_file(
+    model_dir: &Path,
+    model_name: &str,
+    path: &Path,
+) -> Result<(String, Vec<u8>), AppError> {
+    let relative = path
+        .strip_prefix(model_dir)
+        .map_err(|e| AppError::Conversion(format!("invalid model file path: {e}")))?;
+    let relative = relative.to_string_lossy().replace('\\', "/");
+    let zip_name = format!("{model_name}/{relative}");
+    let bytes = fs::read(path).await?;
+    Ok((zip_name, bytes))
+}
+
+struct ZipCentralEntry {
+    name: String,
+    crc32: u32,
+    size: u32,
+    local_offset: u32,
+}
+
+fn build_zip(files: Vec<(String, Vec<u8>)>) -> Result<Vec<u8>, AppError> {
+    let mut archive = Vec::new();
+    let mut central_entries = Vec::new();
+
+    for (name, bytes) in files {
+        let local_offset = checked_len_u32(archive.len(), "zip offset")?;
+        let crc32 = crc32(&bytes);
+        let size = checked_len_u32(bytes.len(), "zip file size")?;
+        write_local_file(&mut archive, &name, &bytes, crc32, size)?;
+        central_entries.push(ZipCentralEntry {
+            name,
+            crc32,
+            size,
+            local_offset,
+        });
+    }
+
+    let central_offset = checked_len_u32(archive.len(), "zip central offset")?;
+    for entry in &central_entries {
+        write_central_entry(&mut archive, entry)?;
+    }
+    let central_size = checked_len_u32(
+        archive.len().saturating_sub(central_offset as usize),
+        "zip central size",
+    )?;
+    write_zip_end(
+        &mut archive,
+        central_entries.len(),
+        central_size,
+        central_offset,
+    )?;
+    Ok(archive)
+}
+
+fn write_local_file(
+    archive: &mut Vec<u8>,
+    name: &str,
+    bytes: &[u8],
+    crc32: u32,
+    size: u32,
+) -> Result<(), AppError> {
+    let name_len = checked_len_u16(name.len(), "zip file name")?;
+    push_u32(archive, ZIP_LOCAL_FILE_HEADER);
+    push_u16(archive, 20);
+    push_u16(archive, 0);
+    push_u16(archive, 0);
+    push_u16(archive, 0);
+    push_u16(archive, 0);
+    push_u32(archive, crc32);
+    push_u32(archive, size);
+    push_u32(archive, size);
+    push_u16(archive, name_len);
+    push_u16(archive, 0);
+    archive.extend_from_slice(name.as_bytes());
+    archive.extend_from_slice(bytes);
+    Ok(())
+}
+
+fn write_central_entry(archive: &mut Vec<u8>, entry: &ZipCentralEntry) -> Result<(), AppError> {
+    let name_len = checked_len_u16(entry.name.len(), "zip central file name")?;
+    push_u32(archive, ZIP_CENTRAL_DIRECTORY_HEADER);
+    push_u16(archive, 20);
+    push_u16(archive, 20);
+    push_u16(archive, 0);
+    push_u16(archive, 0);
+    push_u16(archive, 0);
+    push_u16(archive, 0);
+    push_u32(archive, entry.crc32);
+    push_u32(archive, entry.size);
+    push_u32(archive, entry.size);
+    push_u16(archive, name_len);
+    push_u16(archive, 0);
+    push_u16(archive, 0);
+    push_u16(archive, 0);
+    push_u16(archive, 0);
+    push_u32(archive, 0);
+    push_u32(archive, entry.local_offset);
+    archive.extend_from_slice(entry.name.as_bytes());
+    Ok(())
+}
+
+fn write_zip_end(
+    archive: &mut Vec<u8>,
+    entries_len: usize,
+    central_size: u32,
+    central_offset: u32,
+) -> Result<(), AppError> {
+    let entries = checked_len_u16(entries_len, "zip entry count")?;
+    push_u32(archive, ZIP_END_OF_CENTRAL_DIRECTORY);
+    push_u16(archive, 0);
+    push_u16(archive, 0);
+    push_u16(archive, entries);
+    push_u16(archive, entries);
+    push_u32(archive, central_size);
+    push_u32(archive, central_offset);
+    push_u16(archive, 0);
+    Ok(())
+}
+
+fn checked_len_u16(len: usize, label: &str) -> Result<u16, AppError> {
+    u16::try_from(len).map_err(|_| AppError::Conversion(format!("{label} exceeds ZIP limits")))
+}
+
+fn checked_len_u32(len: usize, label: &str) -> Result<u32, AppError> {
+    u32::try_from(len).map_err(|_| AppError::Conversion(format!("{label} exceeds ZIP limits")))
+}
+
+fn push_u16(buf: &mut Vec<u8>, value: u16) {
+    buf.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_u32(buf: &mut Vec<u8>, value: u32) {
+    buf.extend_from_slice(&value.to_le_bytes());
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = 0xffff_ffffu32;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            let mask = 0u32.wrapping_sub(crc & 1);
+            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+        }
+    }
+    !crc
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,5 +337,10 @@ mod tests {
     #[test]
     fn validate_extension_rejects_unknown() {
         assert!(validate_extension("model.h5").is_err());
+    }
+
+    #[test]
+    fn validate_extension_rejects_savedmodel() {
+        assert!(validate_extension("model.savedmodel").is_err());
     }
 }
