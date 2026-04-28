@@ -6,10 +6,32 @@ fn main() {
     init_tracing();
 
     #[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
-    dioxus::LaunchBuilder::server().launch(tensorrt_converter::app::App);
+    launch_server();
 
     #[cfg(any(target_arch = "wasm32", not(feature = "server")))]
     dioxus::launch(tensorrt_converter::app::App);
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
+fn launch_server() -> ! {
+    use dioxus::prelude::DioxusRouterExt;
+    use dioxus::server::ServeConfig;
+    use dioxus::server::axum::{Router, extract::DefaultBodyLimit};
+    use tensorrt_converter::models::config::AppConfig;
+
+    let upload_limit = upload_limit_bytes(&AppConfig::from_env());
+
+    dioxus::server::serve(move || async move {
+        Ok(Router::new()
+            .serve_dioxus_application(ServeConfig::new(), tensorrt_converter::app::App)
+            .layer(DefaultBodyLimit::max(upload_limit)))
+    });
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
+fn upload_limit_bytes(config: &tensorrt_converter::models::config::AppConfig) -> usize {
+    let bytes = config.max_upload_size_mb.saturating_mul(1024 * 1024);
+    usize::try_from(bytes).unwrap_or(usize::MAX)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
