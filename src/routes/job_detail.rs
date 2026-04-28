@@ -4,6 +4,8 @@ use crate::api::{cancel_job, download_model, get_job_status};
 use crate::app::Route;
 use crate::components::ProgressBar;
 use crate::models::job::{JobId, JobStatus};
+#[cfg(target_arch = "wasm32")]
+use dioxus::document::eval;
 use dioxus::prelude::*;
 
 /// Detail view for a single conversion job.

@@ -9,39 +9,42 @@ use dioxus::prelude::*;
 
 // Shared types used in the function signatures (compiled on all targets).
 use crate::models::config::{GpuInfo, TensorRtImage};
-use crate::models::job::{ConversionJob, JobId, ModelFormat, SubmitJobRequest, TrtOptions};
+use crate::models::job::{ConversionJob, JobId, SubmitJobRequest};
 use crate::models::template::ConfigTemplate;
 
 // ---------------------------------------------------------------------------
 // Server-only imports, state, and helpers
 // ---------------------------------------------------------------------------
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
 use {
     crate::errors::AppError,
-    crate::models::config::{AppConfig, GpuId},
+    crate::models::config::{AppConfig, GpuId, load_dotenv},
+    crate::models::job::{ModelFormat, TrtOptions},
     crate::server::db::{self, DbPool},
     crate::server::docker::DockerService,
     crate::server::storage::StorageService,
+    std::collections::HashSet,
     tokio::sync::OnceCell,
 };
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
 static DB_POOL: OnceCell<DbPool> = OnceCell::const_new();
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
 static DOCKER_SERVICE: OnceCell<DockerService> = OnceCell::const_new();
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
 static APP_CONFIG: std::sync::OnceLock<AppConfig> = std::sync::OnceLock::new();
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
 fn app_config() -> &'static AppConfig {
     APP_CONFIG.get_or_init(AppConfig::from_env)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
 async fn db_pool() -> Result<&'static DbPool, AppError> {
     DB_POOL
         .get_or_try_init(|| async {
+            load_dotenv();
             let url = std::env::var("DATABASE_URL")
                 .unwrap_or_else(|_| "sqlite://data/converter.db".into());
             db::init_db(&url).await
@@ -49,22 +52,22 @@ async fn db_pool() -> Result<&'static DbPool, AppError> {
         .await
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
 async fn docker_service() -> Result<&'static DockerService, AppError> {
     DOCKER_SERVICE.get_or_try_init(DockerService::new).await
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
 fn storage_service() -> StorageService {
     StorageService::new(app_config())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
 fn to_server_err(e: AppError) -> ServerFnError {
     ServerFnError::new(e.to_string())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
 fn model_ext(format: &ModelFormat) -> &'static str {
     match format {
         ModelFormat::Onnx => "onnx",
@@ -72,7 +75,7 @@ fn model_ext(format: &ModelFormat) -> &'static str {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
 fn build_new_job(
     model_name: String,
     model_format: ModelFormat,
@@ -99,7 +102,7 @@ fn build_new_job(
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
 fn parse_job_id(s: &str) -> Result<JobId, AppError> {
     s.parse::<uuid::Uuid>()
         .map(JobId)
@@ -118,19 +121,57 @@ pub async fn get_available_images() -> Result<Vec<TensorRtImage>, ServerFnError>
     let local_images = match docker_service().await {
         Ok(docker) => docker.list_tensorrt_images().await.unwrap_or_default(),
         Err(e) => {
-            tracing::warn!(error = ?e, "Docker unavailable; returning curated image list");
+            tracing::warn!(error = ?e, "Docker unavailable; returning configured image list");
             vec![]
         }
     };
 
-    if !local_images.is_empty() {
-        return Ok(local_images);
-    }
-
-    Ok(curated_tensorrt_images())
+    let configured = configured_tensorrt_images().await.map_err(to_server_err)?;
+    Ok(merge_image_lists(
+        local_images,
+        configured,
+        curated_tensorrt_images(),
+    ))
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
+#[derive(Debug, serde::Deserialize)]
+struct TensorRtImagesConfig {
+    images: Vec<TensorRtImage>,
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
+async fn configured_tensorrt_images() -> Result<Vec<TensorRtImage>, AppError> {
+    load_dotenv();
+    let path = std::env::var("TENSORRT_IMAGES_CONFIG")
+        .unwrap_or_else(|_| "config/images.toml".to_string());
+    let path = std::path::PathBuf::from(path);
+
+    match tokio::fs::read_to_string(&path).await {
+        Ok(contents) => toml::from_str::<TensorRtImagesConfig>(&contents)
+            .map(|config| config.images)
+            .map_err(AppError::Config),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(vec![]),
+        Err(e) => Err(AppError::Io(e)),
+    }
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
+fn merge_image_lists(
+    local: Vec<TensorRtImage>,
+    configured: Vec<TensorRtImage>,
+    curated: Vec<TensorRtImage>,
+) -> Vec<TensorRtImage> {
+    let mut seen = HashSet::new();
+    local
+        .into_iter()
+        .chain(configured)
+        .chain(curated)
+        .filter(|image| seen.insert(image.tag.clone()))
+        .collect()
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
 fn curated_tensorrt_images() -> Vec<TensorRtImage> {
     vec![
         TensorRtImage {
@@ -195,13 +236,13 @@ pub async fn submit_job(
     let storage = storage_service();
 
     // Resource check: free GPU memory must be > 1.4 * workspace_mb
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
     {
         use crate::server::gpu::GpuService;
         let gpu_svc = GpuService::new();
         let gpus = gpu_svc.detect_gpus().await;
         let selected_gpu = gpus.iter().find(|g| g.id == GpuId(req.gpu_id));
-        
+
         match selected_gpu {
             Some(gpu) => {
                 let required_mb = (req.trt_options.workspace_mb as f64 * 1.4) as u64;
@@ -212,9 +253,16 @@ pub async fn submit_job(
                     ))));
                 }
             }
+            None if gpus.is_empty() => {
+                tracing::warn!(
+                    gpu_id = req.gpu_id,
+                    "GPU detection unavailable; accepting manually selected GPU"
+                );
+            }
             None => {
                 return Err(to_server_err(AppError::Validation(format!(
-                    "GPU device {} not found", req.gpu_id
+                    "GPU device {} not found",
+                    req.gpu_id
                 ))));
             }
         }
@@ -339,8 +387,8 @@ pub async fn cancel_job(job_id: String) -> Result<(), ServerFnError> {
                 bollard::query_parameters::StopContainerOptionsBuilder::default()
                     .t(5)
                     .build(),
-                ),
-            )
+            ),
+        )
         .await
     {
         Ok(())

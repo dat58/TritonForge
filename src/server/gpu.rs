@@ -5,7 +5,8 @@ use crate::models::config::{GpuId, GpuInfo};
 use tokio::process::Command;
 use tracing::instrument;
 
-const NVIDIA_SMI_QUERY: &str = "--query-gpu=index,name,memory.total,memory.free --format=csv,noheader,nounits";
+const NVIDIA_SMI_QUERY: &str =
+    "--query-gpu=index,name,memory.total,memory.free --format=csv,noheader,nounits";
 
 /// Async service for querying available NVIDIA GPUs.
 #[derive(Debug, Clone, Default)]

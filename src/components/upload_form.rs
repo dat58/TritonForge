@@ -6,12 +6,15 @@ use crate::components::{GpuSelector, ImageSelector, TemplateSelector};
 use crate::models::config::GpuId;
 use crate::models::job::{ModelFormat, SubmitJobRequest, TrtOptions};
 use dioxus::prelude::*;
+use futures_util::StreamExt;
 
 /// Main upload form for submitting a new TensorRT conversion job.
 #[component]
 pub fn UploadForm() -> Element {
     let mut file_bytes: Signal<Option<Vec<u8>>> = use_signal(|| None);
     let mut file_name = use_signal(String::new);
+    let mut file_size: Signal<Option<u64>> = use_signal(|| None);
+    let mut file_load_progress: Signal<Option<u8>> = use_signal(|| None);
     let mut file_load_error: Signal<Option<String>> = use_signal(|| None);
     let mut model_format: Signal<Option<ModelFormat>> = use_signal(|| None);
     let mut selected_gpu: Signal<Option<GpuId>> = use_signal(|| None);
@@ -62,9 +65,15 @@ pub fn UploadForm() -> Element {
                             let data = evt.data();
                             let files = data.files();
                             file_load_error.set(None);
+                            file_bytes.set(None);
+                            file_load_progress.set(None);
                             spawn(async move {
                                 let Some(file) = files.into_iter().next() else { return };
                                 let name = file.name();
+                                let size = file.size();
+                                file_name.set(name.clone());
+                                file_size.set(Some(size));
+                                file_load_progress.set(Some(0));
 
                                 // Auto-detect model format from file extension
                                 let detected = detect_format(&name);
@@ -72,12 +81,14 @@ pub fn UploadForm() -> Element {
                                     model_format.set(detected);
                                 }
 
-                                match file.read_bytes().await {
+                                match read_file_with_progress(file, size, file_load_progress).await {
                                     Ok(bytes) => {
-                                        file_name.set(name);
-                                        file_bytes.set(Some(bytes.to_vec()));
+                                        file_load_progress.set(Some(100));
+                                        file_bytes.set(Some(bytes));
                                     }
                                     Err(e) => {
+                                        file_size.set(None);
+                                        file_load_progress.set(None);
                                         file_load_error.set(Some(format!(
                                             "Could not read file: {e}"
                                         )));
@@ -95,7 +106,23 @@ pub fn UploadForm() -> Element {
                             }
                             span { class: "text-teal-300 font-medium text-sm", "{file_name}" }
                             span { class: "text-slate-500 text-xs",
-                                {format_file_size(file_bytes.read().as_ref().map(|b| b.len()).unwrap_or(0))}
+                                {format_file_size(file_size.read().unwrap_or(0))}
+                            }
+                        }
+                    } else if let Some(progress) = *file_load_progress.read() {
+                        div { class: "flex flex-col items-center gap-2 pointer-events-none w-full px-8",
+                            div { class: "w-10 h-10 rounded-xl bg-slate-800 flex items-center justify-center mb-1",
+                                div { class: "w-4 h-4 border-2 border-cyan-300/70 border-t-cyan-300 rounded-full animate-spin" }
+                            }
+                            span { class: "text-slate-300 font-medium text-sm", "{file_name}" }
+                            span { class: "text-slate-500 text-xs",
+                                "Reading {format_file_size(file_size.read().unwrap_or(0))}"
+                            }
+                            div { class: "w-full h-1.5 rounded-full bg-slate-800 overflow-hidden",
+                                div {
+                                    class: "h-full rounded-full bg-cyan-400 transition-all",
+                                    style: "width: {progress}%;",
+                                }
                             }
                         }
                     } else {
@@ -318,12 +345,12 @@ pub fn UploadForm() -> Element {
                 disabled: !can_submit || *submitting.read(),
                 onclick: move |_| {
                     if !can_submit || *submitting.read() { return; }
-                    let bytes = file_bytes.read().clone().unwrap_or_default();
+                    let Some(bytes) = file_bytes.read().clone() else { return; };
                     let name = strip_extension(file_name.read().as_str());
-                    let fmt  = model_format.read().clone().unwrap();
-                    let gpu  = selected_gpu.read().unwrap();
-                    let img  = selected_image.read().clone().unwrap_or_default();
-                    let tmpl = selected_template.read().clone().unwrap_or_default();
+                    let Some(fmt) = model_format.read().clone() else { return; };
+                    let Some(gpu) = *selected_gpu.read() else { return; };
+                    let Some(img) = selected_image.read().clone() else { return; };
+                    let Some(tmpl) = selected_template.read().clone() else { return; };
                     let path = server_output_path.read().clone();
                     let path_opt = if path.trim().is_empty() { None } else { Some(path) };
 
@@ -376,6 +403,33 @@ pub fn UploadForm() -> Element {
     }
 }
 
+async fn read_file_with_progress(
+    file: dioxus::html::FileData,
+    total_size: u64,
+    mut progress: Signal<Option<u8>>,
+) -> Result<Vec<u8>, dioxus::CapturedError> {
+    let mut bytes = Vec::with_capacity(total_size as usize);
+    let mut loaded = 0u64;
+    let mut stream = file.byte_stream();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        loaded += chunk.len() as u64;
+        bytes.extend_from_slice(chunk.as_ref());
+        progress.set(Some(read_progress_percent(loaded, total_size)));
+    }
+
+    Ok(bytes)
+}
+
+fn read_progress_percent(loaded: u64, total_size: u64) -> u8 {
+    if total_size == 0 {
+        return 100;
+    }
+
+    ((loaded.saturating_mul(100) / total_size).min(100)) as u8
+}
+
 fn detect_format(name: &str) -> Option<ModelFormat> {
     let ext = name.rsplit('.').next()?.to_lowercase();
     match ext.as_str() {
@@ -385,7 +439,7 @@ fn detect_format(name: &str) -> Option<ModelFormat> {
     }
 }
 
-fn format_file_size(bytes: usize) -> String {
+fn format_file_size(bytes: u64) -> String {
     if bytes >= 1024 * 1024 {
         format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
     } else {

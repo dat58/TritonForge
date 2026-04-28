@@ -2,9 +2,9 @@
 
 use crate::errors::AppError;
 use crate::models::config::TensorRtImage;
-use bollard::Docker;
 use bollard::models::ImageSummary;
 use bollard::query_parameters::{CreateImageOptionsBuilder, ListImagesOptionsBuilder};
+use bollard::{API_DEFAULT_VERSION, Docker};
 use std::collections::HashMap;
 use tokio_stream::StreamExt;
 use tracing::instrument;
@@ -35,7 +35,11 @@ impl DockerService {
     /// ```
     #[instrument]
     pub async fn new() -> Result<Self, AppError> {
-        let client = Docker::connect_with_local_defaults()?;
+        crate::models::config::load_dotenv();
+        let client = match std::env::var("DOCKER_SOCKET") {
+            Ok(socket) => Docker::connect_with_socket(&socket, 120, API_DEFAULT_VERSION)?,
+            Err(_) => Docker::connect_with_local_defaults()?,
+        };
         client.ping().await?;
         tracing::info!("connected to Docker daemon");
         Ok(Self { client })
@@ -54,7 +58,7 @@ impl DockerService {
         let summaries = self.client.list_images(Some(options)).await?;
         let images: Vec<TensorRtImage> = summaries
             .into_iter()
-            .filter_map(parse_tensorrt_image)
+            .flat_map(parse_tensorrt_images)
             .collect();
 
         tracing::debug!(count = images.len(), "listed TensorRT images");
@@ -101,8 +105,19 @@ impl DockerService {
     }
 }
 
-fn parse_tensorrt_image(summary: ImageSummary) -> Option<TensorRtImage> {
-    let tag = summary.repo_tags.into_iter().next()?;
+fn parse_tensorrt_images(summary: ImageSummary) -> Vec<TensorRtImage> {
+    summary
+        .repo_tags
+        .into_iter()
+        .filter_map(parse_tensorrt_image_tag)
+        .collect()
+}
+
+fn parse_tensorrt_image_tag(tag: String) -> Option<TensorRtImage> {
+    if tag == "<none>:<none>" {
+        return None;
+    }
+
     let version_part = tag
         .strip_prefix(&format!("{TENSORRT_IMAGE_PREFIX}:"))
         .map(str::to_owned)?;

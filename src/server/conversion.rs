@@ -326,9 +326,7 @@ fn build_trtexec_cmd(
         }
     }
 
-    cmd.push(format!(
-        "--saveEngine={CONTAINER_OUTPUT_DIR}/model.engine"
-    ));
+    cmd.push(format!("--saveEngine={CONTAINER_OUTPUT_DIR}/model.engine"));
 
     if options.explicit_batch {
         cmd.push("--explicitBatch".to_string());

@@ -2,6 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::OnceLock;
+
+#[cfg(not(target_arch = "wasm32"))]
+static DOTENV_LOADED: OnceLock<()> = OnceLock::new();
 
 /// Opaque GPU device index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -57,6 +62,8 @@ pub struct AppConfig {
 impl AppConfig {
     /// Loads configuration from environment variables, falling back to safe defaults.
     pub fn from_env() -> Self {
+        load_dotenv();
+
         Self {
             upload_dir: PathBuf::from(
                 std::env::var("UPLOAD_DIR")
@@ -79,3 +86,15 @@ impl AppConfig {
         }
     }
 }
+
+/// Loads `.env` into process environment once on native targets.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn load_dotenv() {
+    DOTENV_LOADED.get_or_init(|| {
+        let _ = dotenvy::dotenv();
+    });
+}
+
+/// No-op `.env` loader for the WASM client.
+#[cfg(target_arch = "wasm32")]
+pub fn load_dotenv() {}
