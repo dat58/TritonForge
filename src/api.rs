@@ -225,7 +225,7 @@ pub async fn get_available_templates() -> Result<Vec<ConfigTemplate>, ServerFnEr
 /// Saves the uploaded model to disk and schedules a TensorRT conversion job.
 ///
 /// Returns the newly created `JobId` for progress polling.
-#[server]
+#[server(input = Cbor, output = Cbor)]
 #[tracing::instrument(skip_all, fields(model_name = %req.model_name, image_tag = %req.image_tag))]
 pub async fn submit_job(
     model_data: Vec<u8>,
@@ -345,7 +345,7 @@ pub async fn list_all_jobs(limit: u32, offset: u32) -> Result<Vec<ConversionJob>
 }
 
 /// Returns the raw engine bytes for a completed job.
-#[server]
+#[server(output = Cbor)]
 #[tracing::instrument(skip_all, fields(job_id))]
 pub async fn download_model(job_id: String) -> Result<Vec<u8>, ServerFnError> {
     let pool = db_pool().await.map_err(to_server_err)?;
