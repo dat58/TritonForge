@@ -2,7 +2,7 @@
 
 use crate::errors::AppError;
 use crate::models::config::AppConfig;
-use crate::models::job::{ConversionJob, JobId, JobStatus, ModelFormat};
+use crate::models::job::{ConversionJob, JobId, JobStatus, ModelFormat, TrtOptions};
 use crate::server::db::{self, DbPool};
 use crate::server::docker::DockerService;
 use crate::server::storage::StorageService;
@@ -112,7 +112,7 @@ impl ConversionService {
             format!("{}:{CONTAINER_OUTPUT_DIR}", temp_output_dir.display()),
         ];
 
-        let cmd = build_trtexec_cmd(&job.model_format, container_model_path);
+        let cmd = build_trtexec_cmd(&job.model_format, container_model_path, &job.trt_options);
         let container_id = self
             .create_and_start_container(job, container_name, binds, cmd)
             .await?;
@@ -312,20 +312,47 @@ fn parse_progress(line: &str) -> Option<u8> {
         .map(|(_, pct)| *pct)
 }
 
-fn build_trtexec_cmd(format: &ModelFormat, container_model_path: &str) -> Vec<String> {
-    let input_flag = match format {
-        ModelFormat::Onnx => format!("--onnx={container_model_path}"),
-        ModelFormat::TensorFlowSavedModel => {
-            format!("--savedModel={container_model_path}")
-        }
-    };
+fn build_trtexec_cmd(
+    format: &ModelFormat,
+    container_model_path: &str,
+    options: &TrtOptions,
+) -> Vec<String> {
+    let mut cmd = vec!["trtexec".to_string()];
 
-    vec![
-        "trtexec".to_string(),
-        input_flag,
-        format!("--saveEngine={CONTAINER_OUTPUT_DIR}/model.engine"),
-        "--fp16".to_string(),
-    ]
+    match format {
+        ModelFormat::Onnx => cmd.push(format!("--onnx={container_model_path}")),
+        ModelFormat::TensorFlowSavedModel => {
+            cmd.push(format!("--savedModel={container_model_path}"))
+        }
+    }
+
+    cmd.push(format!(
+        "--saveEngine={CONTAINER_OUTPUT_DIR}/model.engine"
+    ));
+
+    if options.explicit_batch {
+        cmd.push("--explicitBatch".to_string());
+    }
+
+    if let Some(ref min) = options.min_shapes {
+        cmd.push(format!("--minShapes={min}"));
+    }
+    if let Some(ref opt) = options.opt_shapes {
+        cmd.push(format!("--optShapes={opt}"));
+    }
+    if let Some(ref max) = options.max_shapes {
+        cmd.push(format!("--maxShapes={max}"));
+    }
+
+    cmd.push(format!("--workspace={}", options.workspace_mb));
+    cmd.push(format!("--minTiming={}", options.min_timing));
+    cmd.push(format!("--avgTiming={}", options.avg_timing));
+
+    if options.fp16 {
+        cmd.push("--fp16".to_string());
+    }
+
+    cmd
 }
 
 async fn find_engine_file(dir: &Path) -> Result<PathBuf, AppError> {

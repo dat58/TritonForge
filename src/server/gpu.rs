@@ -5,7 +5,7 @@ use crate::models::config::{GpuId, GpuInfo};
 use tokio::process::Command;
 use tracing::instrument;
 
-const NVIDIA_SMI_QUERY: &str = "--query-gpu=index,name,memory.total --format=csv,noheader,nounits";
+const NVIDIA_SMI_QUERY: &str = "--query-gpu=index,name,memory.total,memory.free --format=csv,noheader,nounits";
 
 /// Async service for querying available NVIDIA GPUs.
 #[derive(Debug, Clone, Default)]
@@ -57,21 +57,23 @@ impl GpuService {
 
 /// Parses CSV lines from `nvidia-smi --format=csv,noheader,nounits`.
 ///
-/// Each line has the form: `index, name, memory_total_mb`
+/// Each line has the form: `index, name, memory_total_mb, memory_free_mb`
 fn parse_nvidia_smi_output(output: &str) -> Vec<GpuInfo> {
     output.lines().filter_map(parse_nvidia_smi_line).collect()
 }
 
 fn parse_nvidia_smi_line(line: &str) -> Option<GpuInfo> {
-    let mut parts = line.splitn(3, ',');
+    let mut parts = line.splitn(4, ',');
     let index: u32 = parts.next()?.trim().parse().ok()?;
     let name = parts.next()?.trim().to_owned();
-    let memory_mb: u64 = parts.next()?.trim().parse().ok()?;
+    let memory_total_mb: u64 = parts.next()?.trim().parse().ok()?;
+    let memory_free_mb: u64 = parts.next()?.trim().parse().ok()?;
 
     Some(GpuInfo {
         id: GpuId(index),
         name,
-        memory_mb,
+        memory_total_mb,
+        memory_free_mb,
     })
 }
 
@@ -82,20 +84,23 @@ mod tests {
 
     #[test]
     fn parse_single_gpu_line() {
-        let line = "0, NVIDIA GeForce RTX 3090, 24576";
+        let line = "0, NVIDIA GeForce RTX 3090, 24576, 24000";
         let info = parse_nvidia_smi_line(line).expect("should parse");
         assert_eq!(info.id, GpuId(0));
         assert_eq!(info.name, "NVIDIA GeForce RTX 3090");
-        assert_eq!(info.memory_mb, 24576);
+        assert_eq!(info.memory_total_mb, 24576);
+        assert_eq!(info.memory_free_mb, 24000);
     }
 
     #[test]
     fn parse_multiple_gpus() {
-        let output = "0, Tesla A100, 81920\n1, Tesla A100, 81920\n";
+        let output = "0, Tesla A100, 81920, 80000\n1, Tesla A100, 81920, 75000\n";
         let gpus = parse_nvidia_smi_output(output);
         assert_eq!(gpus.len(), 2);
         assert_eq!(gpus[0].id, GpuId(0));
+        assert_eq!(gpus[0].memory_free_mb, 80000);
         assert_eq!(gpus[1].id, GpuId(1));
+        assert_eq!(gpus[1].memory_free_mb, 75000);
     }
 
     #[test]
@@ -106,7 +111,7 @@ mod tests {
 
     #[test]
     fn parse_malformed_line_is_skipped() {
-        let output = "0, Tesla A100, 81920\nbad line\n1, RTX 4090, 24564\n";
+        let output = "0, Tesla A100, 81920, 80000\nbad line\n1, RTX 4090, 24564, 24000\n";
         let gpus = parse_nvidia_smi_output(output);
         assert_eq!(gpus.len(), 2);
     }
