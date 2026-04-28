@@ -2,7 +2,7 @@
 
 use crate::errors::AppError;
 use crate::models::config::GpuId;
-use crate::models::job::{ConversionJob, JobId, JobStatus, ModelFormat};
+use crate::models::job::{ConversionJob, JobId, JobStatus, ModelFormat, TrtOptions};
 use chrono::DateTime;
 use sqlx::{FromRow, SqlitePool};
 use std::path::PathBuf;
@@ -36,6 +36,7 @@ struct ConversionJobRow {
     image_tag: String,
     gpu_id: i64,
     template_name: String,
+    trt_options: String,
     status: String,
     progress_percent: i64,
     output_path: Option<String>,
@@ -61,6 +62,9 @@ fn row_to_job(row: ConversionJobRow) -> Result<ConversionJob, AppError> {
         .map_err(|e| AppError::Validation(format!("invalid updated_at: {e}")))?
         .to_utc();
 
+    let trt_options: TrtOptions = serde_json::from_str(&row.trt_options)
+        .map_err(|e| AppError::Conversion(format!("failed to parse trt_options: {e}")))?;
+
     Ok(ConversionJob {
         id: JobId(id_uuid),
         model_name: row.model_name,
@@ -68,6 +72,7 @@ fn row_to_job(row: ConversionJobRow) -> Result<ConversionJob, AppError> {
         image_tag: row.image_tag,
         gpu_id: GpuId(gpu_raw),
         template_name: row.template_name,
+        trt_options,
         status: JobStatus::from_str(&row.status)?,
         progress_percent: u8::try_from(row.progress_percent).unwrap_or(100),
         output_path: row.output_path.map(PathBuf::from),
@@ -80,11 +85,14 @@ fn row_to_job(row: ConversionJobRow) -> Result<ConversionJob, AppError> {
 /// Inserts a new job record into the database.
 #[instrument(skip(pool), fields(job_id = %job.id))]
 pub async fn insert_job(pool: &DbPool, job: &ConversionJob) -> Result<(), AppError> {
+    let trt_options_json = serde_json::to_string(&job.trt_options)
+        .map_err(|e| AppError::Conversion(format!("failed to serialize trt_options: {e}")))?;
+
     sqlx::query(
         "INSERT INTO conversion_jobs \
-         (id, model_name, model_format, image_tag, gpu_id, template_name, \
+         (id, model_name, model_format, image_tag, gpu_id, template_name, trt_options, \
           status, progress_percent, output_path, error_message, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(job.id.to_string())
     .bind(&job.model_name)
@@ -92,6 +100,7 @@ pub async fn insert_job(pool: &DbPool, job: &ConversionJob) -> Result<(), AppErr
     .bind(&job.image_tag)
     .bind(i64::from(job.gpu_id.0))
     .bind(&job.template_name)
+    .bind(trt_options_json)
     .bind(job.status.to_string())
     .bind(i64::from(job.progress_percent))
     .bind(
@@ -184,7 +193,7 @@ pub async fn update_job_failed(
 #[instrument(skip(pool), fields(job_id = %job_id))]
 pub async fn get_job(pool: &DbPool, job_id: &JobId) -> Result<ConversionJob, AppError> {
     let row = sqlx::query_as::<_, ConversionJobRow>(
-        "SELECT id, model_name, model_format, image_tag, gpu_id, template_name, \
+        "SELECT id, model_name, model_format, image_tag, gpu_id, template_name, trt_options, \
          status, progress_percent, output_path, error_message, created_at, updated_at \
          FROM conversion_jobs WHERE id = ?",
     )
@@ -203,7 +212,7 @@ pub async fn list_jobs(
     offset: u32,
 ) -> Result<Vec<ConversionJob>, AppError> {
     let rows = sqlx::query_as::<_, ConversionJobRow>(
-        "SELECT id, model_name, model_format, image_tag, gpu_id, template_name, \
+        "SELECT id, model_name, model_format, image_tag, gpu_id, template_name, trt_options, \
          status, progress_percent, output_path, error_message, created_at, updated_at \
          FROM conversion_jobs \
          ORDER BY created_at DESC \
