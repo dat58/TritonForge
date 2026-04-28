@@ -3781,7 +3781,6 @@ dependencies = [
  "dioxus",
  "dotenvy",
  "futures-timer",
- "futures-util",
  "pretty_assertions",
  "serde",
  "serde_json",
