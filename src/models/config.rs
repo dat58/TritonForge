@@ -21,7 +21,9 @@ pub struct GpuInfo {
     /// Human-readable GPU model name.
     pub name: String,
     /// Total GPU memory in megabytes.
-    pub memory_mb: u64,
+    pub memory_total_mb: u64,
+    /// Free GPU memory in megabytes.
+    pub memory_free_mb: u64,
 }
 
 /// A supported TensorRT Docker image entry from the images config.

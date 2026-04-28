@@ -69,6 +69,8 @@ pub struct ConversionJob {
     pub gpu_id: GpuId,
     /// Name of the config.pbtxt template to apply.
     pub template_name: String,
+    /// TensorRT conversion options.
+    pub trt_options: TrtOptions,
     /// Current lifecycle state.
     pub status: JobStatus,
     /// Conversion progress from 0 to 100.
@@ -81,6 +83,54 @@ pub struct ConversionJob {
     pub created_at: DateTime<Utc>,
     /// Timestamp of the last status update.
     pub updated_at: DateTime<Utc>,
+}
+
+/// TensorRT conversion options for trtexec.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrtOptions {
+    /// Use explicit batch dimension (recommended for ONNX).
+    pub explicit_batch: bool,
+    /// Minimum shapes for dynamic axes (e.g., "input:1x3x224x224").
+    pub min_shapes: Option<String>,
+    /// Optimal shapes for dynamic axes.
+    pub opt_shapes: Option<String>,
+    /// Maximum shapes for dynamic axes.
+    pub max_shapes: Option<String>,
+    /// Workspace size in MiB.
+    pub workspace_mb: u32,
+    /// Number of minimization iterations.
+    pub min_timing: u32,
+    /// Number of averaging iterations.
+    pub avg_timing: u32,
+    /// Enable FP16 precision.
+    pub fp16: bool,
+}
+
+impl Default for TrtOptions {
+    fn default() -> Self {
+        Self {
+            explicit_batch: true,
+            min_shapes: None,
+            opt_shapes: None,
+            max_shapes: None,
+            workspace_mb: 4096,
+            min_timing: 8,
+            avg_timing: 16,
+            fp16: true,
+        }
+    }
+}
+
+/// Request payload for submitting a new conversion job.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubmitJobRequest {
+    pub model_name: String,
+    pub model_format: ModelFormat,
+    pub image_tag: String,
+    pub gpu_id: u32,
+    pub template_name: String,
+    pub server_output_path: Option<String>,
+    pub trt_options: TrtOptions,
 }
 
 // Import GpuId here to avoid circular dependency in the struct definition
