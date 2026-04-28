@@ -1,17 +1,89 @@
 //! Job detail page with live progress tracking and download support.
 
-use crate::api::{cancel_job, download_model, get_job_status};
+use crate::api::{cancel_job, download_model, get_job_logs, get_job_status};
 use crate::app::Route;
 use crate::components::ProgressBar;
 use crate::models::job::{JobId, JobStatus};
 #[cfg(target_arch = "wasm32")]
 use dioxus::document::eval;
 use dioxus::prelude::*;
+use futures_timer::Delay;
+use std::time::Duration;
 
 /// Detail view for a single conversion job.
 #[component]
 pub fn JobDetailPage(job_id: String) -> Element {
     let parsed_id = job_id.parse::<uuid::Uuid>().ok().map(JobId);
+    let mut refresh_tick = use_signal(|| 0u32);
+    let mut refresh_polling = use_signal(|| false);
+
+    let job = use_resource({
+        let job_id = job_id.clone();
+        move || {
+            let id = job_id.clone();
+            let _ = refresh_tick();
+            async move { get_job_status(id).await }
+        }
+    });
+
+    let nav = use_navigator();
+    let mut downloading = use_signal(|| false);
+    let mut download_error: Signal<Option<String>> = use_signal(|| None);
+    let mut cancelling = use_signal(|| false);
+    let mut show_logs = use_signal(|| false);
+    let mut log_tick = use_signal(|| 0u32);
+    let mut log_polling = use_signal(|| false);
+
+    let logs = use_resource({
+        let job_id = job_id.clone();
+        move || {
+            let id = job_id.clone();
+            let should_show = show_logs();
+            let _ = log_tick();
+            async move {
+                if should_show {
+                    get_job_logs(id, 1_000).await.map(Some)
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+    });
+
+    use_effect(move || {
+        let is_active = job
+            .read()
+            .as_ref()
+            .and_then(|result| result.as_ref().ok())
+            .map(|j| {
+                matches!(
+                    j.status,
+                    JobStatus::Pending
+                        | JobStatus::Preparing
+                        | JobStatus::Converting
+                        | JobStatus::Finalizing
+                )
+            })
+            .unwrap_or(false);
+
+        if is_active && !*refresh_polling.read() {
+            refresh_polling.set(true);
+            spawn(async move {
+                Delay::new(Duration::from_secs(2)).await;
+                *refresh_tick.write() += 1;
+                refresh_polling.set(false);
+            });
+        }
+
+        if is_active && *show_logs.read() && !*log_polling.read() {
+            log_polling.set(true);
+            spawn(async move {
+                Delay::new(Duration::from_secs(2)).await;
+                *log_tick.write() += 1;
+                log_polling.set(false);
+            });
+        }
+    });
 
     let Some(jid) = parsed_id else {
         return rsx! {
@@ -27,19 +99,6 @@ pub fn JobDetailPage(job_id: String) -> Element {
             }
         };
     };
-
-    let job = use_resource({
-        let jid = jid.clone();
-        move || {
-            let id = jid.to_string();
-            async move { get_job_status(id).await }
-        }
-    });
-
-    let nav = use_navigator();
-    let mut downloading = use_signal(|| false);
-    let mut download_error: Signal<Option<String>> = use_signal(|| None);
-    let mut cancelling = use_signal(|| false);
 
     rsx! {
         div { class: "min-h-screen",
@@ -77,6 +136,7 @@ pub fn JobDetailPage(job_id: String) -> Element {
                         let is_done   = j.status == JobStatus::Completed;
                         let is_failed = j.status == JobStatus::Failed;
                         let model_name    = j.model_name.clone();
+                        let model_version = j.model_version.to_string();
                         let jid_for_dl    = jid.clone();
                         let jid_for_cancel = jid.clone();
                         let fmt_str     = j.model_format.to_string();
@@ -84,8 +144,6 @@ pub fn JobDetailPage(job_id: String) -> Element {
                         let created_str = j.created_at.format("%Y-%m-%d %H:%M UTC").to_string();
                         let updated_str = j.updated_at.format("%Y-%m-%d %H:%M UTC").to_string();
                         let image_tag   = j.image_tag.clone();
-                        let tmpl_name   = j.template_name.clone();
-                        let out_path    = j.output_path.as_ref().map(|p| p.display().to_string());
                         let err_msg     = j.error_message.clone();
                         let jid_str     = jid.to_string();
 
@@ -107,15 +165,13 @@ pub fn JobDetailPage(job_id: String) -> Element {
                                     }
 
                                     div { class: "grid grid-cols-2 sm:grid-cols-3 gap-4",
+                                        {meta_cell("Model Name", &model_name)}
+                                        {meta_cell("Version", &model_version)}
                                         {meta_cell("Format",   &fmt_str)}
                                         {meta_cell("GPU",      &gpu_str)}
                                         {meta_cell("Image",    &image_tag)}
-                                        {meta_cell("Template", &tmpl_name)}
                                         {meta_cell("Created",  &created_str)}
                                         {meta_cell("Updated",  &updated_str)}
-                                        if let Some(ref path) = out_path {
-                                            {meta_cell("Output Path", path)}
-                                        }
                                     }
                                 }
 
@@ -124,9 +180,42 @@ pub fn JobDetailPage(job_id: String) -> Element {
                                     h2 { class: "text-sm font-semibold uppercase tracking-wider text-slate-500 mb-5",
                                         "Progress"
                                     }
-                                    ProgressBar {
-                                        job_id: jid.clone(),
-                                        auto_refresh: is_active,
+                                    ProgressBar { job: j.clone() }
+                                    div { class: "mt-8 border-t border-slate-800/70 pt-5",
+                                        button {
+                                            r#type: "button",
+                                            class: "flex items-center justify-between w-full px-3 py-2 rounded-lg text-sm text-slate-300 hover:text-cyan-300 hover:bg-slate-800/60 transition-colors",
+                                            onclick: move |_| {
+                                                show_logs.toggle();
+                                                *log_tick.write() += 1;
+                                            },
+                                            span { "Container Logs" }
+                                            span { if *show_logs.read() { "▲" } else { "▼" } }
+                                        }
+                                        if *show_logs.read() {
+                                            div { class: "mt-3 rounded-lg border border-slate-800 bg-slate-950/60 overflow-hidden",
+                                                {match &*logs.read() {
+                                                    None => rsx! {
+                                                        div { class: "px-3 py-3 text-sm text-slate-500", "Loading logs..." }
+                                                    },
+                                                    Some(Err(e)) => rsx! {
+                                                        div { class: "px-3 py-3 text-sm text-rose-400", "Failed to load logs: {e}" }
+                                                    },
+                                                    Some(Ok(None)) => rsx! {
+                                                        div { class: "px-3 py-3 text-sm text-slate-500", "Open logs to load container output." }
+                                                    },
+                                                    Some(Ok(Some(text))) => rsx! {
+                                                        pre { class: "max-h-80 overflow-auto p-3 text-xs text-slate-300 whitespace-pre-wrap font-mono",
+                                                            if text.trim().is_empty() {
+                                                                "No container logs yet."
+                                                            } else {
+                                                                "{text}"
+                                                            }
+                                                        }
+                                                    },
+                                                }}
+                                            }
+                                        }
                                     }
                                 }
 
@@ -152,7 +241,7 @@ pub fn JobDetailPage(job_id: String) -> Element {
                                                         Ok(bytes) => {
                                                             trigger_browser_download(
                                                                 &bytes,
-                                                                &format!("{dl_name}.engine"),
+                                                                &format!("{dl_name}.zip"),
                                                             ).await;
                                                             downloading.set(false);
                                                         }
@@ -169,7 +258,7 @@ pub fn JobDetailPage(job_id: String) -> Element {
                                                     "Preparing download..."
                                                 }
                                             } else {
-                                                "↓  Download Engine File"
+                                                "↓  Download Model Folder"
                                             }
                                         }
                                     }
@@ -202,6 +291,7 @@ pub fn JobDetailPage(job_id: String) -> Element {
                                             cancelling.set(true);
                                             spawn(async move {
                                                 let _ = cancel_job(c_id).await;
+                                                *refresh_tick.write() += 1;
                                                 cancelling.set(false);
                                             });
                                         },
@@ -264,7 +354,7 @@ async fn trigger_browser_download(bytes: &[u8], filename: &str) {
     {
         let bytes_json = serde_json::to_string(bytes).unwrap_or_else(|_| "[]".to_string());
         let filename_json =
-            serde_json::to_string(filename).unwrap_or_else(|_| "\"model.engine\"".to_string());
+            serde_json::to_string(filename).unwrap_or_else(|_| "\"model.zip\"".to_string());
         let js = format!(
             "const b=new Uint8Array({bytes_json});
              const blob=new Blob([b]);
