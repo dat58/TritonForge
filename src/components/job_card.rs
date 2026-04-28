@@ -37,7 +37,9 @@ pub fn JobCard(job: ConversionJob) -> Element {
                             class: "text-slate-100 font-semibold text-sm truncate group-hover:text-cyan-300 transition-colors duration-200",
                             "{job.model_name}"
                         }
-                        p { class: "text-slate-500 text-xs mt-0.5", "{job.model_format}" }
+                        p { class: "text-slate-500 text-xs mt-0.5",
+                            "{job.model_format} · v{job.model_version}"
+                        }
                     }
                     span {
                         class: "flex-shrink-0 px-2.5 py-0.5 rounded-full text-xs font-medium {badge_bg} {badge_text}",
