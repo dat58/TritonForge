@@ -69,7 +69,6 @@ fn to_server_err(e: AppError) -> ServerFnError {
 }
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
-#[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
 fn build_new_job(
     model_name: String,
     model_version: u32,
