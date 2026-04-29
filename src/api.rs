@@ -193,32 +193,7 @@ fn merge_image_lists(
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
 fn curated_tensorrt_images() -> Vec<TensorRtImage> {
-    vec![
-        TensorRtImage {
-            name: "TensorRT 10.3 — CUDA 12.6 (latest)".into(),
-            tag: "nvcr.io/nvidia/tensorrt:24.08-py3".into(),
-            cuda_version: "12.6".into(),
-            tensorrt_version: "10.3".into(),
-        },
-        TensorRtImage {
-            name: "TensorRT 10.0 — CUDA 12.4".into(),
-            tag: "nvcr.io/nvidia/tensorrt:24.04-py3".into(),
-            cuda_version: "12.4".into(),
-            tensorrt_version: "10.0".into(),
-        },
-        TensorRtImage {
-            name: "TensorRT 9.3 — CUDA 12.2".into(),
-            tag: "nvcr.io/nvidia/tensorrt:23.12-py3".into(),
-            cuda_version: "12.2".into(),
-            tensorrt_version: "9.3".into(),
-        },
-        TensorRtImage {
-            name: "TensorRT 8.6 — CUDA 12.0".into(),
-            tag: "nvcr.io/nvidia/tensorrt:23.04-py3".into(),
-            cuda_version: "12.0".into(),
-            tensorrt_version: "8.6".into(),
-        },
-    ]
+    vec![]
 }
 
 /// Returns all NVIDIA GPUs detected by nvidia-smi.
