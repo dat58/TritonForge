@@ -17,17 +17,9 @@ instance_group [
 
 
 input [
-  {
-    name: "$INPUT_NAME"
-    data_type: $INPUT_DATA_TYPE
-    dims: $INPUT_DIMENTIONS
-  }
+$INPUT_BLOCKS
 ]
 
 output [
-  {
-    name: "$OUTPUT_NAME"
-    data_type: $OUTPUT_DATA_TYPE
-    dims: $OUTPUT_DIMENTIONS
-  }
+$OUTPUT_BLOCKS
 ]
