@@ -21,6 +21,8 @@ pub type DbPool = SqlitePool;
 ///
 /// `database_url` must be a valid SQLite URL such as `sqlite://data/converter.db`
 /// or the special `sqlite::memory:` for in-memory testing.
+/// File-backed databases use rollback journaling so committed rows are stored
+/// in the main database file across service/container restarts.
 #[instrument(skip_all, fields(database_url))]
 pub async fn init_db(database_url: &str) -> Result<DbPool, AppError> {
     let options = SqliteConnectOptions::from_str(database_url)?
@@ -28,11 +30,7 @@ pub async fn init_db(database_url: &str) -> Result<DbPool, AppError> {
         .busy_timeout(Duration::from_secs(10));
     create_database_parent_dir(options.get_filename()).await?;
 
-    let options = if options.get_filename() == std::path::Path::new(":memory:") {
-        options
-    } else {
-        options.journal_mode(SqliteJournalMode::Wal)
-    };
+    let options = apply_persistent_file_options(options);
 
     let pool = SqlitePool::connect_with(options).await?;
     sqlx::migrate!()
@@ -41,6 +39,14 @@ pub async fn init_db(database_url: &str) -> Result<DbPool, AppError> {
         .map_err(|e| AppError::Conversion(format!("migration failed: {e}")))?;
     tracing::info!(database_url, "database pool initialised");
     Ok(pool)
+}
+
+fn apply_persistent_file_options(options: SqliteConnectOptions) -> SqliteConnectOptions {
+    if options.get_filename() == std::path::Path::new(":memory:") {
+        return options;
+    }
+
+    options.journal_mode(SqliteJournalMode::Delete)
 }
 
 async fn create_database_parent_dir(path: &std::path::Path) -> Result<(), AppError> {
@@ -637,6 +643,22 @@ mod tests {
         pool.close().await;
 
         assert!(db_path.exists());
+    }
+
+    #[tokio::test]
+    async fn init_db_uses_delete_journal_for_file_database() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let db_path = temp_dir.path().join("converter.db");
+        let database_url = format!("sqlite://{}", db_path.display());
+
+        let pool = init_db(&database_url).await.expect("database init");
+        let journal_mode: (String,) = sqlx::query_as("PRAGMA journal_mode")
+            .fetch_one(&pool)
+            .await
+            .expect("journal mode lookup");
+        pool.close().await;
+
+        assert_eq!(journal_mode.0, "delete");
     }
 
     #[tokio::test]
