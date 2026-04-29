@@ -2,6 +2,7 @@
 
 use crate::errors::AppError;
 use crate::models::config::GpuId;
+use crate::models::group::{GroupId, ModelGroup, ModelGroupMember};
 use crate::models::job::{
     ConversionJob, ConversionJobLog, JobId, JobStatus, ModelFormat, TrtOptions,
 };
@@ -361,6 +362,203 @@ pub async fn list_job_logs(
     .await?;
 
     rows.into_iter().rev().map(row_to_log).collect()
+}
+
+// ── Model group CRUD ──────────────────────────────────────────────────────────
+
+#[derive(Debug, FromRow)]
+struct ModelGroupRow {
+    id: String,
+    name: String,
+    dir_path: String,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, FromRow)]
+struct ModelGroupMemberRow {
+    job_id: String,
+    model_name: String,
+}
+
+fn row_to_group(row: ModelGroupRow, members: Vec<ModelGroupMember>) -> Result<ModelGroup, AppError> {
+    let id = row
+        .id
+        .parse()
+        .map_err(|e| AppError::Validation(format!("invalid group id: {e}")))?;
+    let created_at = DateTime::parse_from_rfc3339(&row.created_at)
+        .map_err(|e| AppError::Validation(format!("invalid group created_at: {e}")))?
+        .to_utc();
+    let updated_at = DateTime::parse_from_rfc3339(&row.updated_at)
+        .map_err(|e| AppError::Validation(format!("invalid group updated_at: {e}")))?
+        .to_utc();
+    Ok(ModelGroup {
+        id,
+        name: row.name,
+        dir_path: PathBuf::from(row.dir_path),
+        members,
+        created_at,
+        updated_at,
+    })
+}
+
+async fn fetch_members(pool: &DbPool, group_id: &GroupId) -> Result<Vec<ModelGroupMember>, AppError> {
+    let rows = sqlx::query_as::<_, ModelGroupMemberRow>(
+        "SELECT job_id, model_name \
+         FROM model_group_members \
+         WHERE group_id = ? \
+         ORDER BY id ASC",
+    )
+    .bind(group_id.to_string())
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| ModelGroupMember {
+            job_id: r.job_id,
+            model_name: r.model_name,
+        })
+        .collect())
+}
+
+/// Inserts a new model group record.
+#[instrument(skip(pool), fields(group_id = %group.id, group_name = %group.name))]
+pub async fn insert_group(pool: &DbPool, group: &ModelGroup) -> Result<(), AppError> {
+    sqlx::query(
+        "INSERT INTO model_groups (id, name, dir_path, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(group.id.to_string())
+    .bind(&group.name)
+    .bind(group.dir_path.to_string_lossy().as_ref())
+    .bind(group.created_at.to_rfc3339())
+    .bind(group.updated_at.to_rfc3339())
+    .execute(pool)
+    .await?;
+
+    tracing::info!("model group inserted");
+    Ok(())
+}
+
+/// Returns all model groups ordered by creation time (newest first).
+#[instrument(skip(pool))]
+pub async fn list_groups(pool: &DbPool) -> Result<Vec<ModelGroup>, AppError> {
+    let rows = sqlx::query_as::<_, ModelGroupRow>(
+        "SELECT id, name, dir_path, created_at, updated_at \
+         FROM model_groups \
+         ORDER BY created_at DESC",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut groups = Vec::with_capacity(rows.len());
+    for row in rows {
+        let gid: GroupId = row
+            .id
+            .parse()
+            .map_err(|e| AppError::Validation(format!("invalid group id: {e}")))?;
+        let members = fetch_members(pool, &gid).await?;
+        groups.push(row_to_group(
+            ModelGroupRow {
+                id: gid.to_string(),
+                ..row
+            },
+            members,
+        )?);
+    }
+    Ok(groups)
+}
+
+/// Fetches a single model group by ID.
+#[instrument(skip(pool), fields(group_id = %group_id))]
+pub async fn get_group(pool: &DbPool, group_id: &GroupId) -> Result<ModelGroup, AppError> {
+    let row = sqlx::query_as::<_, ModelGroupRow>(
+        "SELECT id, name, dir_path, created_at, updated_at \
+         FROM model_groups WHERE id = ?",
+    )
+    .bind(group_id.to_string())
+    .fetch_one(pool)
+    .await?;
+
+    let members = fetch_members(pool, group_id).await?;
+    row_to_group(row, members)
+}
+
+/// Updates the name of an existing group.
+#[instrument(skip(pool), fields(group_id = %group_id, name))]
+pub async fn update_group_name(
+    pool: &DbPool,
+    group_id: &GroupId,
+    name: &str,
+) -> Result<(), AppError> {
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "UPDATE model_groups SET name = ?, updated_at = ? WHERE id = ?",
+    )
+    .bind(name)
+    .bind(&now)
+    .bind(group_id.to_string())
+    .execute(pool)
+    .await?;
+
+    tracing::debug!("group name updated");
+    Ok(())
+}
+
+/// Adds a member to a group. Silently ignores duplicate (same group_id + model_name).
+#[instrument(skip(pool), fields(group_id = %group_id, model_name = %member.model_name))]
+pub async fn add_group_member(
+    pool: &DbPool,
+    group_id: &GroupId,
+    member: &ModelGroupMember,
+) -> Result<(), AppError> {
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT OR IGNORE INTO model_group_members \
+         (group_id, job_id, model_name, created_at) \
+         VALUES (?, ?, ?, ?)",
+    )
+    .bind(group_id.to_string())
+    .bind(&member.job_id)
+    .bind(&member.model_name)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+
+    tracing::debug!("group member added");
+    Ok(())
+}
+
+/// Removes a member from a group by model name.
+#[instrument(skip(pool), fields(group_id = %group_id, model_name))]
+pub async fn remove_group_member(
+    pool: &DbPool,
+    group_id: &GroupId,
+    model_name: &str,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "DELETE FROM model_group_members WHERE group_id = ? AND model_name = ?",
+    )
+    .bind(group_id.to_string())
+    .bind(model_name)
+    .execute(pool)
+    .await?;
+
+    tracing::debug!("group member removed");
+    Ok(())
+}
+
+/// Deletes a model group and all its members (cascade).
+#[instrument(skip(pool), fields(group_id = %group_id))]
+pub async fn delete_group(pool: &DbPool, group_id: &GroupId) -> Result<(), AppError> {
+    sqlx::query("DELETE FROM model_groups WHERE id = ?")
+        .bind(group_id.to_string())
+        .execute(pool)
+        .await?;
+
+    tracing::info!("model group deleted");
+    Ok(())
 }
 
 #[cfg(test)]
