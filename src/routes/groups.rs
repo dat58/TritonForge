@@ -176,6 +176,37 @@ fn model_key(job_id: &str, model_name: &str) -> String {
     format!("{job_id}/{model_name}")
 }
 
+fn short_tensorrt_image_tag(image_tag: &str) -> &str {
+    let tag = image_tag.rsplit_once(':').map_or(image_tag, |(_, tag)| tag);
+
+    tag.strip_suffix("-py3").unwrap_or(tag)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::short_tensorrt_image_tag;
+
+    #[test]
+    fn short_tensorrt_image_tag_drops_repository_and_py_suffix() {
+        assert_eq!(
+            short_tensorrt_image_tag("nvcr.io/nvidia/tensorrt:24.04-py3"),
+            "24.04"
+        );
+        assert_eq!(
+            short_tensorrt_image_tag("nvcr.io/nvidia/tensorrt:23.09-py3"),
+            "23.09"
+        );
+    }
+
+    #[test]
+    fn short_tensorrt_image_tag_keeps_non_py_tag() {
+        assert_eq!(
+            short_tensorrt_image_tag("tensorrt:24.04-custom"),
+            "24.04-custom"
+        );
+    }
+}
+
 fn selected_additions(
     desired: &HashSet<String>,
     current: &HashSet<String>,
@@ -312,6 +343,7 @@ fn model_picker(
                                     let in_group = current_keys.contains(&key);
                                     let selected = desired_keys.contains(&key);
                                     let created = job.created_at.format("%b %d").to_string();
+                                    let image_tag = short_tensorrt_image_tag(&job.image_tag).to_owned();
 
                                     let (card_border, card_bg, indicator_style, model_text) = if in_group && selected {
                                         (
@@ -372,6 +404,9 @@ fn model_picker(
                                             }
                                             p { class: "text-xs text-slate-500 mt-0.5",
                                                 "{job.model_format} · v{job.model_version}"
+                                            }
+                                            p { class: "text-xs text-slate-500 mt-0.5",
+                                                "TensorRT · {image_tag}"
                                             }
                                             p { class: "text-xs text-slate-600 mt-1", "{created}" }
                                         }
