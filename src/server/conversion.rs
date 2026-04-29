@@ -26,11 +26,10 @@ const CONTAINER_OUTPUT_DIR: &str = "/output";
 
 /// Progress percentage assigned at each trtexec output milestone.
 const PROGRESS_MILESTONES: &[(&str, u8)] = &[
-    ("Building engine", 20),
-    ("Building optimization", 40),
-    ("Finished engine building", 70),
-    ("Serializing engine", 80),
-    ("Inference average", 90),
+    ("building engine", 20),
+    ("Trace details", 40),
+    ("Average on", 60),
+    ("Performance summary", 90),
 ];
 
 const LOG_BATCH_SIZE: usize = 25;
