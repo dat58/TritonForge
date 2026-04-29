@@ -8,6 +8,7 @@ pub mod app;
 pub mod components;
 pub mod errors;
 pub mod models;
+pub mod onnx;
 pub mod routes;
 
 #[cfg(not(target_arch = "wasm32"))]

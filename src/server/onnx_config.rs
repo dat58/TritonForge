@@ -1,22 +1,15 @@
 //! ONNX metadata extraction and Triton config.pbtxt generation.
 
 use crate::errors::AppError;
+use crate::onnx::{
+    GRAPH_INITIALIZER_FIELD, GRAPH_INPUT_FIELD, GRAPH_OUTPUT_FIELD, MODEL_GRAPH_FIELD,
+    TENSOR_ELEM_TYPE_FIELD, TENSOR_SHAPE_FIELD, TYPE_TENSOR_FIELD, VALUE_NAME_FIELD,
+    VALUE_TYPE_FIELD, fields, first_message_field, first_string_field, first_varint_field,
+    parse_shape_dims,
+};
 use std::collections::HashSet;
 use std::path::Path;
 use tokio::fs;
-
-const MODEL_GRAPH_FIELD: u32 = 7;
-const GRAPH_INITIALIZER_FIELD: u32 = 5;
-const GRAPH_INPUT_FIELD: u32 = 11;
-const GRAPH_OUTPUT_FIELD: u32 = 12;
-const VALUE_NAME_FIELD: u32 = 1;
-const VALUE_TYPE_FIELD: u32 = 2;
-const TYPE_TENSOR_FIELD: u32 = 1;
-const TENSOR_ELEM_TYPE_FIELD: u32 = 1;
-const TENSOR_SHAPE_FIELD: u32 = 2;
-const SHAPE_DIM_FIELD: u32 = 1;
-const DIM_VALUE_FIELD: u32 = 1;
-const DIM_PARAM_FIELD: u32 = 2;
 
 /// Generates `config.pbtxt` from `templates/config.pbtxt` and ONNX graph metadata.
 pub async fn generate_config_pbtxt(
@@ -140,41 +133,6 @@ fn fill_template(
     Ok(rendered)
 }
 
-fn first_message_field(bytes: &[u8], field_number: u32) -> Option<&[u8]> {
-    fields(bytes)
-        .find(|field| field.number == field_number && field.wire_type == 2)
-        .and_then(|field| field.data)
-}
-
-fn first_string_field(bytes: &[u8], field_number: u32) -> Option<String> {
-    let raw = first_message_field(bytes, field_number)?;
-    std::str::from_utf8(raw).ok().map(str::to_owned)
-}
-
-fn first_varint_field(bytes: &[u8], field_number: u32) -> Option<u64> {
-    fields(bytes)
-        .find(|field| field.number == field_number && field.wire_type == 0)
-        .and_then(|field| field.varint)
-}
-
-fn parse_shape_dims(shape: &[u8]) -> Vec<i64> {
-    fields(shape)
-        .filter(|field| field.number == SHAPE_DIM_FIELD && field.wire_type == 2)
-        .filter_map(|field| field.data)
-        .map(parse_dim)
-        .collect()
-}
-
-fn parse_dim(dim: &[u8]) -> i64 {
-    if let Some(value) = first_varint_field(dim, DIM_VALUE_FIELD) {
-        return i64::try_from(value).unwrap_or(-1);
-    }
-    if first_message_field(dim, DIM_PARAM_FIELD).is_some() {
-        return -1;
-    }
-    -1
-}
-
 fn format_dims(dims: &[i64]) -> String {
     let values: Vec<String> = triton_dims(dims).iter().map(ToString::to_string).collect();
     format!("[ {} ]", values.join(", "))
@@ -210,85 +168,6 @@ fn onnx_elem_type_to_triton(elem_type: u64) -> Result<String, AppError> {
         }
     };
     Ok(triton_type.to_owned())
-}
-
-struct ProtoField<'a> {
-    number: u32,
-    wire_type: u8,
-    data: Option<&'a [u8]>,
-    varint: Option<u64>,
-}
-
-fn fields(bytes: &[u8]) -> ProtoFields<'_> {
-    ProtoFields { bytes, offset: 0 }
-}
-
-struct ProtoFields<'a> {
-    bytes: &'a [u8],
-    offset: usize,
-}
-
-impl<'a> Iterator for ProtoFields<'a> {
-    type Item = ProtoField<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let key = read_varint(self.bytes, &mut self.offset)?;
-        let number = u32::try_from(key >> 3).ok()?;
-        let wire_type = u8::try_from(key & 0x07).ok()?;
-
-        match wire_type {
-            0 => read_varint(self.bytes, &mut self.offset).map(|value| ProtoField {
-                number,
-                wire_type,
-                data: None,
-                varint: Some(value),
-            }),
-            1 => skip_bytes(self.bytes, &mut self.offset, 8).map(|data| ProtoField {
-                number,
-                wire_type,
-                data: Some(data),
-                varint: None,
-            }),
-            2 => read_length_delimited(self.bytes, &mut self.offset).map(|data| ProtoField {
-                number,
-                wire_type,
-                data: Some(data),
-                varint: None,
-            }),
-            5 => skip_bytes(self.bytes, &mut self.offset, 4).map(|data| ProtoField {
-                number,
-                wire_type,
-                data: Some(data),
-                varint: None,
-            }),
-            _ => None,
-        }
-    }
-}
-
-fn read_length_delimited<'a>(bytes: &'a [u8], offset: &mut usize) -> Option<&'a [u8]> {
-    let len = usize::try_from(read_varint(bytes, offset)?).ok()?;
-    skip_bytes(bytes, offset, len)
-}
-
-fn skip_bytes<'a>(bytes: &'a [u8], offset: &mut usize, len: usize) -> Option<&'a [u8]> {
-    let end = offset.checked_add(len)?;
-    let data = bytes.get(*offset..end)?;
-    *offset = end;
-    Some(data)
-}
-
-fn read_varint(bytes: &[u8], offset: &mut usize) -> Option<u64> {
-    let mut value = 0u64;
-    for shift in (0..64).step_by(7) {
-        let byte = *bytes.get(*offset)?;
-        *offset += 1;
-        value |= u64::from(byte & 0x7f) << shift;
-        if byte & 0x80 == 0 {
-            return Some(value);
-        }
-    }
-    None
 }
 
 #[cfg(test)]

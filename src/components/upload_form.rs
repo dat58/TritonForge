@@ -5,6 +5,7 @@ use crate::app::Route;
 use crate::components::{GpuSelector, ImageSelector};
 use crate::models::config::GpuId;
 use crate::models::job::{SubmitJobRequest, TrtOptions};
+use crate::onnx::{OnnxTensorInfo, parse_onnx_inputs};
 use dioxus::prelude::*;
 
 /// Main upload form for submitting a new TensorRT conversion job.
@@ -31,6 +32,7 @@ pub fn UploadForm() -> Element {
     let mut avg_timing = use_signal(|| 16u32);
     let mut fp16 = use_signal(|| true);
     let mut show_advanced = use_signal(|| false);
+    let mut onnx_inputs: Signal<Vec<OnnxTensorInfo>> = use_signal(Vec::new);
 
     let nav = use_navigator();
 
@@ -65,6 +67,7 @@ pub fn UploadForm() -> Element {
                             file_load_error.set(None);
                             file_bytes.set(None);
                             file_load_progress.set(None);
+                            onnx_inputs.set(Vec::new());
                             spawn(async move {
                                 let Some(file) = files.into_iter().next() else { return };
                                 let name = file.name();
@@ -77,6 +80,9 @@ pub fn UploadForm() -> Element {
                                 match read_selected_file(file, file_load_progress).await {
                                     Ok(bytes) => {
                                         file_load_progress.set(Some(100));
+                                        let inputs =
+                                            parse_onnx_inputs(&bytes).unwrap_or_default();
+                                        onnx_inputs.set(inputs);
                                         file_bytes.set(Some(bytes));
                                     }
                                     Err(e) => {
@@ -231,19 +237,26 @@ pub fn UploadForm() -> Element {
                     }
 
                     div { class: "grid grid-cols-3 gap-3",
-                        for (lbl, mut sig) in [
-                            ("Min Shapes", min_shapes),
-                            ("Opt Shapes", opt_shapes),
-                            ("Max Shapes", max_shapes),
-                        ] {
-                            div { class: "flex flex-col gap-1.5",
-                                label { class: "text-[10px] font-bold uppercase text-slate-500", "{lbl}" }
-                                input {
-                                    r#type: "text",
-                                    class: "field text-xs py-1.5",
-                                    placeholder: "input:1x3x224x224",
-                                    value: "{sig}",
-                                    oninput: move |evt| sig.set(evt.value()),
+                        {
+                            let ph_min = make_shapes_hint(&onnx_inputs.read(), 1);
+                            let ph_opt = make_shapes_hint(&onnx_inputs.read(), 4);
+                            let ph_max = make_shapes_hint(&onnx_inputs.read(), 8);
+                            rsx! {
+                                for (lbl, mut sig, ph) in [
+                                    ("Min Shapes", min_shapes, ph_min),
+                                    ("Opt Shapes", opt_shapes, ph_opt),
+                                    ("Max Shapes", max_shapes, ph_max),
+                                ] {
+                                    div { class: "flex flex-col gap-1.5",
+                                        label { class: "text-[10px] font-bold uppercase text-slate-500", "{lbl}" }
+                                        input {
+                                            r#type: "text",
+                                            class: "field text-xs py-1.5",
+                                            placeholder: "{ph}",
+                                            value: "{sig}",
+                                            oninput: move |evt| sig.set(evt.value()),
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -402,4 +415,29 @@ fn submit_btn_style(can_submit: bool, submitting: bool) -> &'static str {
     } else {
         "background: #1e293b; color: #475569; cursor: not-allowed;"
     }
+}
+
+/// Builds a trtexec shape hint string for the given batch size.
+///
+/// Returns an empty string when there are no inputs so the field shows no placeholder.
+fn make_shapes_hint(inputs: &[OnnxTensorInfo], batch: i64) -> String {
+    if inputs.is_empty() {
+        return String::new();
+    }
+    inputs
+        .iter()
+        .map(|t| {
+            let mut dims = t.dims.clone();
+            if let Some(first) = dims.first_mut() {
+                *first = batch;
+            }
+            let dim_str = dims
+                .iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>()
+                .join("x");
+            format!("{}:{}", t.name, dim_str)
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
