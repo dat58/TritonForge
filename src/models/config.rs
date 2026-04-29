@@ -57,6 +57,8 @@ pub struct AppConfig {
     pub conversion_timeout_secs: u64,
     /// Path to the Docker daemon socket.
     pub docker_socket: PathBuf,
+    /// Directory where model groups are stored.
+    pub groups_dir: PathBuf,
 }
 
 impl AppConfig {
@@ -82,6 +84,9 @@ impl AppConfig {
                 .unwrap_or(1800),
             docker_socket: PathBuf::from(
                 std::env::var("DOCKER_SOCKET").unwrap_or_else(|_| "/var/run/docker.sock".into()),
+            ),
+            groups_dir: PathBuf::from(
+                std::env::var("GROUPS_DIR").unwrap_or_else(|_| "/data/tensorrt-groups".into()),
             ),
         }
     }
