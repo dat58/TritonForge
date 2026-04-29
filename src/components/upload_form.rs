@@ -24,15 +24,14 @@ pub fn UploadForm() -> Element {
     let mut error_msg: Signal<Option<String>> = use_signal(|| None);
 
     let mut explicit_batch = use_signal(|| true);
-    let min_shapes = use_signal(String::new);
-    let opt_shapes = use_signal(String::new);
-    let max_shapes = use_signal(String::new);
+    let mut min_shapes = use_signal(String::new);
+    let mut opt_shapes = use_signal(String::new);
+    let mut max_shapes = use_signal(String::new);
     let mut workspace_mb = use_signal(|| 4096u32);
     let mut min_timing = use_signal(|| 8u32);
     let mut avg_timing = use_signal(|| 16u32);
     let mut fp16 = use_signal(|| true);
     let mut show_advanced = use_signal(|| false);
-    let mut onnx_inputs: Signal<Vec<OnnxTensorInfo>> = use_signal(Vec::new);
 
     let nav = use_navigator();
 
@@ -67,7 +66,9 @@ pub fn UploadForm() -> Element {
                             file_load_error.set(None);
                             file_bytes.set(None);
                             file_load_progress.set(None);
-                            onnx_inputs.set(Vec::new());
+                            min_shapes.set(String::new());
+                            opt_shapes.set(String::new());
+                            max_shapes.set(String::new());
                             spawn(async move {
                                 let Some(file) = files.into_iter().next() else { return };
                                 let name = file.name();
@@ -82,7 +83,9 @@ pub fn UploadForm() -> Element {
                                         file_load_progress.set(Some(100));
                                         let inputs =
                                             parse_onnx_inputs(&bytes).unwrap_or_default();
-                                        onnx_inputs.set(inputs);
+                                        min_shapes.set(make_shapes_hint(&inputs, 1));
+                                        opt_shapes.set(make_shapes_hint(&inputs, 4));
+                                        max_shapes.set(make_shapes_hint(&inputs, 8));
                                         file_bytes.set(Some(bytes));
                                     }
                                     Err(e) => {
@@ -237,26 +240,18 @@ pub fn UploadForm() -> Element {
                     }
 
                     div { class: "grid grid-cols-3 gap-3",
-                        {
-                            let ph_min = make_shapes_hint(&onnx_inputs.read(), 1);
-                            let ph_opt = make_shapes_hint(&onnx_inputs.read(), 4);
-                            let ph_max = make_shapes_hint(&onnx_inputs.read(), 8);
-                            rsx! {
-                                for (lbl, mut sig, ph) in [
-                                    ("Min Shapes", min_shapes, ph_min),
-                                    ("Opt Shapes", opt_shapes, ph_opt),
-                                    ("Max Shapes", max_shapes, ph_max),
-                                ] {
-                                    div { class: "flex flex-col gap-1.5",
-                                        label { class: "text-[10px] font-bold uppercase text-slate-500", "{lbl}" }
-                                        input {
-                                            r#type: "text",
-                                            class: "field text-xs py-1.5",
-                                            placeholder: "{ph}",
-                                            value: "{sig}",
-                                            oninput: move |evt| sig.set(evt.value()),
-                                        }
-                                    }
+                        for (lbl, mut sig) in [
+                            ("Min Shapes", min_shapes),
+                            ("Opt Shapes", opt_shapes),
+                            ("Max Shapes", max_shapes),
+                        ] {
+                            div { class: "flex flex-col gap-1.5",
+                                label { class: "text-[10px] font-bold uppercase text-slate-500", "{lbl}" }
+                                input {
+                                    r#type: "text",
+                                    class: "field text-xs py-1.5",
+                                    value: "{sig}",
+                                    oninput: move |evt| sig.set(evt.value()),
                                 }
                             }
                         }
