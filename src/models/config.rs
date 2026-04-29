@@ -72,7 +72,7 @@ impl AppConfig {
                     .unwrap_or_else(|_| "/tmp/tensorrt-converter/uploads".into()),
             ),
             output_dir: PathBuf::from(
-                std::env::var("OUTPUT_DIR").unwrap_or_else(|_| "/data/tensorrt-models".into()),
+                std::env::var("OUTPUT_DIR").unwrap_or_else(|_| "/tmp/tensorrt-converter/outputs".into()),
             ),
             max_upload_size_mb: std::env::var("MAX_UPLOAD_SIZE_MB")
                 .ok()
@@ -86,7 +86,7 @@ impl AppConfig {
                 std::env::var("DOCKER_SOCKET").unwrap_or_else(|_| "/var/run/docker.sock".into()),
             ),
             groups_dir: PathBuf::from(
-                std::env::var("GROUPS_DIR").unwrap_or_else(|_| "/data/tensorrt-groups".into()),
+                std::env::var("GROUPS_DIR").unwrap_or_else(|_| "/tmp/tensorrt-converter/groups".into()),
             ),
         }
     }
