@@ -4,10 +4,10 @@ use crate::api::{cancel_job, download_model, get_job_logs, get_job_status};
 use crate::app::Route;
 use crate::components::ProgressBar;
 use crate::models::job::{JobId, JobStatus};
+use crate::routes::timer;
 #[cfg(target_arch = "wasm32")]
 use dioxus::document::eval;
 use dioxus::prelude::*;
-use futures_timer::Delay;
 use std::time::Duration;
 
 /// Detail view for a single conversion job.
@@ -15,7 +15,8 @@ use std::time::Duration;
 pub fn JobDetailPage(job_id: String) -> Element {
     let parsed_id = job_id.parse::<uuid::Uuid>().ok().map(JobId);
     let mut refresh_tick = use_signal(|| 0u32);
-    let mut refresh_polling = use_signal(|| false);
+    let mut log_tick = use_signal(|| 0u32);
+    let mut job_active = use_signal(|| false);
 
     let job = use_resource({
         let job_id = job_id.clone();
@@ -31,8 +32,6 @@ pub fn JobDetailPage(job_id: String) -> Element {
     let mut download_error: Signal<Option<String>> = use_signal(|| None);
     let mut cancelling = use_signal(|| false);
     let mut show_logs = use_signal(|| false);
-    let mut log_tick = use_signal(|| 0u32);
-    let mut log_polling = use_signal(|| false);
 
     let logs = use_resource({
         let job_id = job_id.clone();
@@ -51,37 +50,32 @@ pub fn JobDetailPage(job_id: String) -> Element {
     });
 
     use_effect(move || {
-        let is_active = job
-            .read()
-            .as_ref()
-            .and_then(|result| result.as_ref().ok())
-            .map(|j| {
-                matches!(
-                    j.status,
-                    JobStatus::Pending
-                        | JobStatus::Preparing
-                        | JobStatus::Converting
-                        | JobStatus::Finalizing
-                )
-            })
-            .unwrap_or(false);
+        let is_active = job_is_active(&job);
 
-        if is_active && !*refresh_polling.read() {
-            refresh_polling.set(true);
-            spawn(async move {
-                Delay::new(Duration::from_secs(2)).await;
-                *refresh_tick.write() += 1;
-                refresh_polling.set(false);
-            });
+        if *job_active.peek() != is_active {
+            job_active.set(is_active);
         }
+    });
 
-        if is_active && *show_logs.read() && !*log_polling.read() {
-            log_polling.set(true);
-            spawn(async move {
-                Delay::new(Duration::from_secs(2)).await;
+    use_future(move || async move {
+        loop {
+            timer::sleep(Duration::from_secs(2)).await;
+            let should_refresh = *job_active.read();
+
+            if should_refresh {
+                *refresh_tick.write() += 1;
+            }
+        }
+    });
+
+    use_future(move || async move {
+        loop {
+            timer::sleep(Duration::from_secs(2)).await;
+            let should_refresh_logs = *show_logs.read() && *job_active.read();
+
+            if should_refresh_logs {
                 *log_tick.write() += 1;
-                log_polling.set(false);
-            });
+            }
         }
     });
 
@@ -338,6 +332,20 @@ fn status_pill(is_done: bool, is_failed: bool, is_active: bool) -> Element {
             }
         }
     }
+}
+
+fn job_is_active(job: &Resource<Result<crate::models::job::ConversionJob, ServerFnError>>) -> bool {
+    job.read()
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .is_some_and(|job| is_active_status(&job.status))
+}
+
+fn is_active_status(status: &JobStatus) -> bool {
+    matches!(
+        status,
+        JobStatus::Pending | JobStatus::Preparing | JobStatus::Converting | JobStatus::Finalizing
+    )
 }
 
 fn meta_cell(label: &str, value: &str) -> Element {
