@@ -79,7 +79,7 @@ pub fn JobCard(props: JobCardProps) -> Element {
                     if can_delete {
                         button {
                             r#type: "button",
-                            class: "flex-shrink-0 px-3 py-1.5 rounded-lg text-xs font-medium bg-rose-900/40 hover:bg-rose-800/60 text-rose-300 border border-rose-800/50 transition-all duration-200",
+                            class: "flex-shrink-0 px-2.5 py-1 rounded-md text-[11px] font-medium bg-rose-900/40 hover:bg-rose-800/60 text-rose-300 border border-rose-800/50 transition-all duration-200",
                             onclick: move |evt| {
                                 evt.stop_propagation();
                                 if *confirm_delete.read() {
