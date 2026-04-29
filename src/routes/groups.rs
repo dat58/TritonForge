@@ -6,7 +6,7 @@ use crate::api::{
 };
 use crate::app::Route;
 use crate::components::GroupCard;
-use crate::models::group::{GroupId, ModelGroupMember};
+use crate::models::group::{GroupId, ModelGroup, ModelGroupMember};
 use crate::models::job::ConversionJob;
 use dioxus::prelude::*;
 use std::collections::HashSet;
@@ -15,10 +15,16 @@ use std::collections::HashSet;
 #[component]
 pub fn GroupsPage() -> Element {
     let mut selected_group_id: Signal<Option<GroupId>> = use_signal(|| None);
-    let checked_models: Signal<HashSet<String>> = use_signal(HashSet::new);
+    let mut checked_models: Signal<HashSet<String>> = use_signal(HashSet::new);
     let mut refresh_tick = use_signal(|| 0u32);
     let grouping_busy = use_signal(|| false);
     let mut create_busy = use_signal(|| false);
+
+    // Clear model selection whenever the active group changes.
+    use_effect(move || {
+        let _ = selected_group_id.read();
+        checked_models.write().clear();
+    });
 
     let groups = use_resource(move || {
         let _ = refresh_tick();
@@ -96,7 +102,8 @@ pub fn GroupsPage() -> Element {
                         }
                     },
                     Some(Ok(list)) => rsx! {
-                        div { class: "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-12",
+                        // Cards grid
+                        div { class: "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4",
                             for group in list {
                                 {
                                     let gid = group.id.clone();
@@ -109,7 +116,14 @@ pub fn GroupsPage() -> Element {
                                         GroupCard {
                                             group: group.clone(),
                                             selected,
-                                            on_select: move |id: GroupId| selected_group_id.set(Some(id)),
+                                            on_select: move |id: GroupId| {
+                                                // Toggle: clicking the selected card collapses it.
+                                                if selected_group_id.read().as_ref() == Some(&id) {
+                                                    selected_group_id.set(None);
+                                                } else {
+                                                    selected_group_id.set(Some(id));
+                                                }
+                                            },
                                             on_rename: move |(id, name): (GroupId, String)| {
                                                 spawn(async move {
                                                     let _ = rename_model_group(id, name).await;
@@ -144,14 +158,20 @@ pub fn GroupsPage() -> Element {
                             }
                         }
 
-                        // Add Models section — only show when there are groups
-                        {add_models_section(
-                            selected_group_id,
-                            checked_models,
-                            grouping_busy,
-                            refresh_tick,
-                            &completed,
-                        )}
+                        // Model picker — shown only when a group card is selected.
+                        {
+                            let maybe_group = selected_group_id
+                                .read()
+                                .as_ref()
+                                .and_then(|id| list.iter().find(|g| &g.id == id))
+                                .cloned();
+
+                            if let Some(sel_group) = maybe_group {
+                                model_picker(sel_group, &completed, checked_models, grouping_busy, refresh_tick)
+                            } else {
+                                rsx! {}
+                            }
+                        }
                     },
                 }}
             }
@@ -159,43 +179,45 @@ pub fn GroupsPage() -> Element {
     }
 }
 
-fn add_models_section(
-    selected_group_id: Signal<Option<GroupId>>,
+/// Dropdown panel showing all completed models in a grid; ticked if already in the group.
+fn model_picker(
+    group: ModelGroup,
+    completed: &Resource<Result<Vec<ConversionJob>, ServerFnError>>,
     mut checked_models: Signal<HashSet<String>>,
     mut grouping_busy: Signal<bool>,
     mut refresh_tick: Signal<u32>,
-    completed: &Resource<Result<Vec<ConversionJob>, ServerFnError>>,
 ) -> Element {
     let checked_count = checked_models.read().len();
-    let has_selection = selected_group_id.read().is_some() && checked_count > 0;
+    let has_new = checked_count > 0;
 
     let button_label = if *grouping_busy.read() {
         "Adding…".to_owned()
     } else if checked_count > 0 {
-        format!("Do Grouping Models ({checked_count} selected)")
+        format!("Do Grouping Models ({checked_count})")
     } else {
         "Do Grouping Models".to_owned()
     };
 
+    let group_name = group.name.clone();
+    let group_id = group.id.clone();
+
     rsx! {
-        div { class: "border-t border-slate-800 pt-10",
-            div { class: "flex items-center justify-between mb-6",
-                div {
-                    h2 { class: "text-lg font-semibold text-slate-200", "Add Models to Group" }
-                    p { class: "text-slate-500 text-sm mt-0.5",
-                        {if selected_group_id.read().is_some() {
-                            "Check models below and click \"Do Grouping Models\" to copy them into the selected group."
-                        } else {
-                            "Select a group above first, then choose models to add."
-                        }}
+        div { class: "mt-6 rounded-xl border border-slate-700/60 bg-slate-900/40 overflow-hidden",
+
+            // Panel header
+            div { class: "flex items-center justify-between px-5 py-3 border-b border-slate-700/60 bg-slate-800/40",
+                div { class: "flex items-center gap-2",
+                    span { class: "text-slate-400 text-sm", "▾" }
+                    h2 { class: "text-sm font-semibold text-slate-200",
+                        "Add models to \"{group_name}\""
                     }
                 }
                 button {
-                    class: "px-4 py-2 rounded-lg text-sm font-medium text-white transition-all duration-200 disabled:opacity-40 disabled:cursor-not-allowed",
+                    class: "px-4 py-1.5 rounded-lg text-sm font-medium text-white transition-all duration-200 disabled:opacity-40 disabled:cursor-not-allowed",
                     style: "background: linear-gradient(135deg, #0891b2, #0d9488);",
-                    disabled: !has_selection || *grouping_busy.read(),
+                    disabled: !has_new || *grouping_busy.read(),
                     onclick: move |_| {
-                        let Some(gid) = selected_group_id.read().clone() else { return; };
+                        let gid = group_id.clone();
                         let members: Vec<ModelGroupMember> = checked_models
                             .read()
                             .iter()
@@ -216,83 +238,112 @@ fn add_models_section(
                         });
                     },
                     if *grouping_busy.read() {
-                        div { class: "inline-block w-3.5 h-3.5 rounded-full border-2 border-white border-t-transparent animate-spin mr-1.5" }
+                        span { class: "inline-block w-3 h-3 rounded-full border-2 border-white border-t-transparent animate-spin mr-1.5" }
                     }
                     "{button_label}"
                 }
             }
 
-            {match &*completed.read() {
-                None => rsx! {
-                    div { class: "flex items-center gap-3 text-slate-400 py-8",
-                        div { class: "w-4 h-4 rounded-full border-2 border-cyan-500 border-t-transparent animate-spin" }
-                        "Loading completed models..."
-                    }
-                },
-                Some(Err(e)) => rsx! {
-                    div { class: "rounded-xl p-5 text-rose-400 border border-rose-800/50 bg-rose-950/20 text-sm",
-                        "Failed to load completed models: {e}"
-                    }
-                },
-                Some(Ok(list)) if list.is_empty() => rsx! {
-                    div { class: "text-slate-500 text-sm py-8 text-center",
-                        "No completed models found."
-                        br {}
-                        Link {
-                            to: Route::Home {},
-                            class: "text-cyan-400 hover:text-cyan-300 transition-colors",
-                            "Convert a model first →"
+            // Model grid
+            div { class: "p-4",
+                {match &*completed.read() {
+                    None => rsx! {
+                        div { class: "flex items-center gap-3 text-slate-400 py-6",
+                            div { class: "w-4 h-4 rounded-full border-2 border-cyan-500 border-t-transparent animate-spin" }
+                            "Loading models..."
                         }
-                    }
-                },
-                Some(Ok(list)) => rsx! {
-                    div { class: "rounded-xl border border-slate-800 overflow-hidden",
-                        // Table header
-                        div { class: "grid grid-cols-[2rem_1fr_6rem_9rem] gap-x-4 px-4 py-2 bg-slate-800/60 text-xs font-semibold uppercase text-slate-500",
-                            div {}
-                            div { "Model" }
-                            div { "Version" }
-                            div { "Completed" }
+                    },
+                    Some(Err(e)) => rsx! {
+                        div { class: "rounded-lg p-4 text-rose-400 border border-rose-800/50 bg-rose-950/20 text-sm",
+                            "Failed to load models: {e}"
                         }
-                        // Rows
-                        for job in list {
-                            {
-                                let key = format!("{}/{}", job.id, job.model_name);
-                                let key_check = key.clone();
-                                let checked = checked_models.read().contains(&key);
-                                let created = job.created_at.format("%b %d, %Y").to_string();
-                                rsx! {
-                                    div {
-                                        key: "{key}",
-                                        class: "grid grid-cols-[2rem_1fr_6rem_9rem] gap-x-4 px-4 py-3 border-t border-slate-800/60 hover:bg-slate-800/30 transition-colors cursor-pointer items-center",
-                                        onclick: move |_| {
-                                            let mut models = checked_models.write();
-                                            if models.contains(&key_check) {
-                                                models.remove(&key_check);
-                                            } else {
-                                                models.insert(key_check.clone());
-                                            }
-                                        },
+                    },
+                    Some(Ok(list)) if list.is_empty() => rsx! {
+                        div { class: "text-slate-500 text-sm py-6 text-center",
+                            "No completed models found. "
+                            Link {
+                                to: Route::Home {},
+                                class: "text-cyan-400 hover:text-cyan-300 transition-colors",
+                                "Convert a model first →"
+                            }
+                        }
+                    },
+                    Some(Ok(list)) => rsx! {
+                        div { class: "grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3",
+                            for job in list {
+                                {
+                                    let key = format!("{}/{}", job.id, job.model_name);
+                                    let key_toggle = key.clone();
+                                    let in_group = group.members.iter().any(|m| m.model_name == job.model_name);
+                                    let selected = checked_models.read().contains(&key);
+                                    let created = job.created_at.format("%b %d").to_string();
+
+                                    let (card_border, card_bg, indicator_style, is_interactive) = if in_group {
+                                        (
+                                            "border-emerald-800/50",
+                                            "bg-emerald-950/20",
+                                            "background:#065f46;border-color:#065f46;",
+                                            false,
+                                        )
+                                    } else if selected {
+                                        (
+                                            "border-cyan-600",
+                                            "bg-cyan-950/20",
+                                            "background:#0891b2;border-color:#0891b2;",
+                                            true,
+                                        )
+                                    } else {
+                                        (
+                                            "border-slate-700/60",
+                                            "hover:bg-slate-800/40",
+                                            "border-color:#475569;",
+                                            true,
+                                        )
+                                    };
+
+                                    let cursor = if is_interactive { "cursor-pointer" } else { "" };
+
+                                    rsx! {
                                         div {
-                                            class: "w-4 h-4 rounded border flex items-center justify-center flex-shrink-0",
-                                            style: if checked { "background: #0891b2; border-color: #0891b2;" } else { "border-color: #475569;" },
-                                            if checked {
-                                                span { class: "text-white text-xs leading-none", "✓" }
+                                            key: "{key}",
+                                            class: "relative rounded-lg border p-3 transition-all duration-150 {card_border} {card_bg} {cursor}",
+                                            onclick: move |_| {
+                                                if !is_interactive { return; }
+                                                let mut models = checked_models.write();
+                                                if models.contains(&key_toggle) {
+                                                    models.remove(&key_toggle);
+                                                } else {
+                                                    models.insert(key_toggle.clone());
+                                                }
+                                            },
+
+                                            // Indicator (top-right)
+                                            div {
+                                                class: "absolute top-2 right-2 w-4 h-4 rounded border flex items-center justify-center flex-shrink-0",
+                                                style: "{indicator_style}",
+                                                if in_group || selected {
+                                                    span { class: "text-white text-[10px] leading-none font-bold", "✓" }
+                                                }
                                             }
+
+                                            // Model info
+                                            p {
+                                                class: "text-sm font-medium pr-5 truncate",
+                                                class: if in_group { "text-emerald-300" } else { "text-slate-200" },
+                                                "{job.model_name}"
+                                            }
+                                            p { class: "text-xs text-slate-500 mt-0.5",
+                                                "{job.model_format} · v{job.model_version}"
+                                            }
+                                            p { class: "text-xs text-slate-600 mt-1", "{created}" }
                                         }
-                                        div { class: "min-w-0",
-                                            p { class: "text-slate-200 text-sm font-medium truncate", "{job.model_name}" }
-                                            p { class: "text-slate-500 text-xs", "{job.model_format}" }
-                                        }
-                                        div { class: "text-slate-400 text-sm", "v{job.model_version}" }
-                                        div { class: "text-slate-500 text-xs", "{created}" }
                                     }
                                 }
                             }
                         }
-                    }
-                },
-            }}
+                    },
+                }}
+            }
         }
     }
 }
