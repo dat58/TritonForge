@@ -1,7 +1,7 @@
 //! Root application component, router definition, and shared layout.
 
 use crate::components::Navbar;
-use crate::routes::{HomePage, JobDetailPage, JobsPage};
+use crate::routes::{GroupsPage, HomePage, JobDetailPage, JobsPage};
 use dioxus::prelude::*;
 
 const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
@@ -17,6 +17,8 @@ pub enum Route {
         Jobs {},
         #[route("/jobs/:id")]
         JobDetail { id: String },
+        #[route("/groups")]
+        Groups {},
     #[end_layout]
     #[route("/:..segments")]
     NotFound { segments: Vec<String> },
@@ -55,6 +57,11 @@ fn Jobs() -> Element {
 #[component]
 fn JobDetail(id: String) -> Element {
     rsx! { JobDetailPage { job_id: id } }
+}
+
+#[component]
+fn Groups() -> Element {
+    rsx! { GroupsPage {} }
 }
 
 #[component]

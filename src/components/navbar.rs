@@ -44,6 +44,11 @@ pub fn Navbar() -> Element {
                         class: "link-nav",
                         "Jobs"
                     }
+                    Link {
+                        to: Route::Groups {},
+                        class: "link-nav",
+                        "Groups"
+                    }
                 }
             }
         }
