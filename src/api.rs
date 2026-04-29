@@ -21,7 +21,7 @@ use {
     crate::errors::AppError,
     crate::models::config::{AppConfig, GpuId, load_dotenv},
     crate::models::group::random_mythology_name,
-    crate::models::job::{ModelFormat, TrtOptions},
+    crate::models::job::{JobStatus, ModelFormat, TrtOptions},
     crate::server::db::{self, DbPool},
     crate::server::docker::DockerService,
     crate::server::storage::StorageService,
@@ -425,6 +425,31 @@ pub async fn cancel_job(job_id: String) -> Result<(), ServerFnError> {
         .map_err(to_server_err)
 }
 
+/// Deletes a completed or failed job row, its logs, and its output directory.
+#[server]
+#[tracing::instrument(skip_all, fields(job_id))]
+pub async fn delete_job(job_id: String) -> Result<(), ServerFnError> {
+    let pool = db_pool().await.map_err(to_server_err)?;
+    let jid = parse_job_id(&job_id).map_err(to_server_err)?;
+    let job = db::get_job(pool, &jid).await.map_err(to_server_err)?;
+
+    if !matches!(job.status, JobStatus::Completed | JobStatus::Failed) {
+        return Err(to_server_err(AppError::Validation(
+            "only completed or failed jobs can be deleted".into(),
+        )));
+    }
+
+    let storage = storage_service();
+    storage
+        .delete_job_output_root(&jid)
+        .await
+        .map_err(to_server_err)?;
+    db::delete_job_logs(pool, &jid)
+        .await
+        .map_err(to_server_err)?;
+    db::delete_job(pool, &jid).await.map_err(to_server_err)
+}
+
 // ── Model group server functions ──────────────────────────────────────────────
 
 /// Creates a new model group, defaulting to a random mythology name.
@@ -448,7 +473,9 @@ pub async fn create_model_group(name: Option<String>) -> Result<ModelGroup, Serv
             created_at: now,
             updated_at: now,
         };
-        db::insert_group(pool, &group).await.map_err(to_server_err)?;
+        db::insert_group(pool, &group)
+            .await
+            .map_err(to_server_err)?;
         Ok(group)
     }
     #[cfg(not(all(not(target_arch = "wasm32"), feature = "server")))]
@@ -469,10 +496,7 @@ pub async fn list_model_groups() -> Result<Vec<ModelGroup>, ServerFnError> {
 
 /// Renames an existing group.
 #[server]
-pub async fn rename_model_group(
-    group_id: GroupId,
-    name: String,
-) -> Result<(), ServerFnError> {
+pub async fn rename_model_group(group_id: GroupId, name: String) -> Result<(), ServerFnError> {
     #[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
     {
         let trimmed = name.trim().to_owned();
@@ -498,10 +522,16 @@ pub async fn add_models_to_group(
     {
         let pool = db_pool().await.map_err(to_server_err)?;
         let storage = storage_service();
-        let group = db::get_group(pool, &group_id).await.map_err(to_server_err)?;
+        let group = db::get_group(pool, &group_id)
+            .await
+            .map_err(to_server_err)?;
 
         for member in &members {
-            if group.members.iter().any(|m| m.model_name == member.model_name) {
+            if group
+                .members
+                .iter()
+                .any(|m| m.model_name == member.model_name)
+            {
                 return Err(ServerFnError::new(format!(
                     "model '{}' already exists in group '{}'",
                     member.model_name, group.name
@@ -533,7 +563,16 @@ pub async fn remove_model_from_group(
 ) -> Result<(), ServerFnError> {
     #[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
     {
+        validate_model_name(&model_name).map_err(to_server_err)?;
         let pool = db_pool().await.map_err(to_server_err)?;
+        let storage = storage_service();
+        let group = db::get_group(pool, &group_id)
+            .await
+            .map_err(to_server_err)?;
+        storage
+            .delete_group_model_dir(&group.name, &model_name)
+            .await
+            .map_err(to_server_err)?;
         db::remove_group_member(pool, &group_id, &model_name)
             .await
             .map_err(to_server_err)
@@ -549,12 +588,16 @@ pub async fn release_model_group(group_id: GroupId) -> Result<(), ServerFnError>
     {
         let pool = db_pool().await.map_err(to_server_err)?;
         let storage = storage_service();
-        let group = db::get_group(pool, &group_id).await.map_err(to_server_err)?;
+        let group = db::get_group(pool, &group_id)
+            .await
+            .map_err(to_server_err)?;
         storage
             .delete_group_dir(&group.name)
             .await
             .map_err(to_server_err)?;
-        db::delete_group(pool, &group_id).await.map_err(to_server_err)
+        db::delete_group(pool, &group_id)
+            .await
+            .map_err(to_server_err)
     }
     #[cfg(not(all(not(target_arch = "wasm32"), feature = "server")))]
     unreachable!()
@@ -567,7 +610,9 @@ pub async fn delete_model_group(group_id: GroupId) -> Result<(), ServerFnError> 
     {
         let pool = db_pool().await.map_err(to_server_err)?;
         let storage = storage_service();
-        let group = db::get_group(pool, &group_id).await.map_err(to_server_err)?;
+        let group = db::get_group(pool, &group_id)
+            .await
+            .map_err(to_server_err)?;
         storage
             .delete_group_dir(&group.name)
             .await
@@ -578,7 +623,9 @@ pub async fn delete_model_group(group_id: GroupId) -> Result<(), ServerFnError> 
                 .await
                 .map_err(to_server_err)?;
         }
-        db::delete_group(pool, &group_id).await.map_err(to_server_err)
+        db::delete_group(pool, &group_id)
+            .await
+            .map_err(to_server_err)
     }
     #[cfg(not(all(not(target_arch = "wasm32"), feature = "server")))]
     unreachable!()

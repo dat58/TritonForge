@@ -300,6 +300,30 @@ pub async fn list_completed_jobs(pool: &DbPool) -> Result<Vec<ConversionJob>, Ap
     rows.into_iter().map(row_to_job).collect()
 }
 
+/// Deletes all persisted logs for a job.
+#[instrument(skip(pool), fields(job_id = %job_id))]
+pub async fn delete_job_logs(pool: &DbPool, job_id: &JobId) -> Result<(), AppError> {
+    sqlx::query("DELETE FROM conversion_job_logs WHERE job_id = ?")
+        .bind(job_id.to_string())
+        .execute(pool)
+        .await?;
+
+    tracing::debug!("job logs deleted");
+    Ok(())
+}
+
+/// Deletes a conversion job row.
+#[instrument(skip(pool), fields(job_id = %job_id))]
+pub async fn delete_job(pool: &DbPool, job_id: &JobId) -> Result<(), AppError> {
+    sqlx::query("DELETE FROM conversion_jobs WHERE id = ?")
+        .bind(job_id.to_string())
+        .execute(pool)
+        .await?;
+
+    tracing::info!("job deleted");
+    Ok(())
+}
+
 #[derive(Debug, FromRow)]
 struct ConversionJobLogRow {
     id: i64,
@@ -398,7 +422,10 @@ struct ModelGroupMemberRow {
     model_name: String,
 }
 
-fn row_to_group(row: ModelGroupRow, members: Vec<ModelGroupMember>) -> Result<ModelGroup, AppError> {
+fn row_to_group(
+    row: ModelGroupRow,
+    members: Vec<ModelGroupMember>,
+) -> Result<ModelGroup, AppError> {
     let id = row
         .id
         .parse()
@@ -419,7 +446,10 @@ fn row_to_group(row: ModelGroupRow, members: Vec<ModelGroupMember>) -> Result<Mo
     })
 }
 
-async fn fetch_members(pool: &DbPool, group_id: &GroupId) -> Result<Vec<ModelGroupMember>, AppError> {
+async fn fetch_members(
+    pool: &DbPool,
+    group_id: &GroupId,
+) -> Result<Vec<ModelGroupMember>, AppError> {
     let rows = sqlx::query_as::<_, ModelGroupMemberRow>(
         "SELECT job_id, model_name \
          FROM model_group_members \
@@ -510,14 +540,12 @@ pub async fn update_group_name(
     name: &str,
 ) -> Result<(), AppError> {
     let now = chrono::Utc::now().to_rfc3339();
-    sqlx::query(
-        "UPDATE model_groups SET name = ?, updated_at = ? WHERE id = ?",
-    )
-    .bind(name)
-    .bind(&now)
-    .bind(group_id.to_string())
-    .execute(pool)
-    .await?;
+    sqlx::query("UPDATE model_groups SET name = ?, updated_at = ? WHERE id = ?")
+        .bind(name)
+        .bind(&now)
+        .bind(group_id.to_string())
+        .execute(pool)
+        .await?;
 
     tracing::debug!("group name updated");
     Ok(())
@@ -554,13 +582,11 @@ pub async fn remove_group_member(
     group_id: &GroupId,
     model_name: &str,
 ) -> Result<(), AppError> {
-    sqlx::query(
-        "DELETE FROM model_group_members WHERE group_id = ? AND model_name = ?",
-    )
-    .bind(group_id.to_string())
-    .bind(model_name)
-    .execute(pool)
-    .await?;
+    sqlx::query("DELETE FROM model_group_members WHERE group_id = ? AND model_name = ?")
+        .bind(group_id.to_string())
+        .bind(model_name)
+        .execute(pool)
+        .await?;
 
     tracing::debug!("group member removed");
     Ok(())
@@ -655,6 +681,26 @@ mod tests {
         let logs = list_job_logs(&pool, &job.id, 100).await.expect("list logs");
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].message, "done");
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn delete_job_helpers_remove_logs_and_job_row() {
+        let pool = init_db("sqlite::memory:").await.expect("database init");
+        let job = sample_job();
+        insert_job(&pool, &job).await.expect("insert job");
+        append_job_logs_batch(&pool, &job.id, &[NewJobLog::new("stdout", "done")])
+            .await
+            .expect("insert log");
+
+        delete_job_logs(&pool, &job.id).await.expect("delete logs");
+        delete_job(&pool, &job.id).await.expect("delete job");
+
+        let logs = list_job_logs(&pool, &job.id, 100).await.expect("list logs");
+        let jobs = list_jobs(&pool, 20, 0).await.expect("list jobs");
+
+        assert!(logs.is_empty());
+        assert!(jobs.is_empty());
         pool.close().await;
     }
 

@@ -96,7 +96,9 @@ impl ConversionService {
             .await;
 
         // Best-effort cleanup of the uploaded model temp file.
-        let _ = self.storage.cleanup_temp(&model_path).await;
+        if let Err(error) = self.storage.cleanup_temp(&model_path).await {
+            tracing::warn!(error = ?error, path = %model_path.display(), "upload cleanup failed");
+        }
 
         result
     }

@@ -120,6 +120,20 @@ impl StorageService {
         )))
     }
 
+    /// Deletes a job's full output root directory (`output_dir/{job_id}/`).
+    #[instrument(skip(self), fields(job_id = %job_id))]
+    pub async fn delete_job_output_root(&self, job_id: &JobId) -> Result<(), AppError> {
+        let dir = self.output_dir.join(job_id.to_string());
+        match fs::remove_dir_all(&dir).await {
+            Ok(()) => {
+                tracing::info!(dir = %dir.display(), "job output root deleted");
+                Ok(())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Returns a zip archive containing the full Triton model directory.
     #[instrument(skip(self), fields(model_dir = %model_dir.display(), model_name))]
     pub async fn zip_model_dir(
@@ -157,6 +171,24 @@ impl StorageService {
         match fs::remove_dir_all(&dir).await {
             Ok(()) => {
                 tracing::info!(dir = %dir.display(), "group directory deleted");
+                Ok(())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Deletes a single copied model directory from a group.
+    #[instrument(skip(self), fields(group_name, model_name))]
+    pub async fn delete_group_model_dir(
+        &self,
+        group_name: &str,
+        model_name: &str,
+    ) -> Result<(), AppError> {
+        let dir = self.groups_dir.join(group_name).join(model_name);
+        match fs::remove_dir_all(&dir).await {
+            Ok(()) => {
+                tracing::info!(dir = %dir.display(), "group model directory deleted");
                 Ok(())
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),

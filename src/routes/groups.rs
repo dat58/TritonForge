@@ -1,8 +1,8 @@
 //! Groups management page — create, view, and manage model groups.
 
 use crate::api::{
-    add_models_to_group, create_model_group, delete_model_group, list_completed_jobs,
-    list_model_groups, release_model_group, rename_model_group,
+    add_models_to_group, create_model_group, list_completed_jobs, list_model_groups,
+    release_model_group, remove_model_from_group, rename_model_group,
 };
 use crate::app::Route;
 use crate::components::GroupCard;
@@ -19,12 +19,6 @@ pub fn GroupsPage() -> Element {
     let mut refresh_tick = use_signal(|| 0u32);
     let grouping_busy = use_signal(|| false);
     let mut create_busy = use_signal(|| false);
-
-    // Clear model selection whenever the active group changes.
-    use_effect(move || {
-        let _ = selected_group_id.read();
-        checked_models.write().clear();
-    });
 
     let groups = use_resource(move || {
         let _ = refresh_tick();
@@ -109,8 +103,7 @@ pub fn GroupsPage() -> Element {
                                     let gid = group.id.clone();
                                     let gid_release = group.id.clone();
                                     let gid_release_check = group.id.clone();
-                                    let gid_delete = group.id.clone();
-                                    let gid_delete_check = group.id.clone();
+                                    let member_keys = group_member_keys(group);
                                     let selected = selected_group_id.read().as_ref() == Some(&gid);
                                     rsx! {
                                         GroupCard {
@@ -120,8 +113,10 @@ pub fn GroupsPage() -> Element {
                                                 // Toggle: clicking the selected card collapses it.
                                                 if selected_group_id.read().as_ref() == Some(&id) {
                                                     selected_group_id.set(None);
+                                                    checked_models.write().clear();
                                                 } else {
                                                     selected_group_id.set(Some(id));
+                                                    checked_models.set(member_keys.clone());
                                                 }
                                             },
                                             on_rename: move |(id, name): (GroupId, String)| {
@@ -138,17 +133,7 @@ pub fn GroupsPage() -> Element {
                                                     *refresh_tick.write() += 1;
                                                     if selected_group_id.read().as_ref() == Some(&check) {
                                                         selected_group_id.set(None);
-                                                    }
-                                                });
-                                            },
-                                            on_delete: move |_: GroupId| {
-                                                let id = gid_delete.clone();
-                                                let check = gid_delete_check.clone();
-                                                spawn(async move {
-                                                    let _ = delete_model_group(id).await;
-                                                    *refresh_tick.write() += 1;
-                                                    if selected_group_id.read().as_ref() == Some(&check) {
-                                                        selected_group_id.set(None);
+                                                        checked_models.write().clear();
                                                     }
                                                 });
                                             },
@@ -179,6 +164,60 @@ pub fn GroupsPage() -> Element {
     }
 }
 
+fn group_member_keys(group: &ModelGroup) -> HashSet<String> {
+    group
+        .members
+        .iter()
+        .map(|member| model_key(&member.job_id, &member.model_name))
+        .collect()
+}
+
+fn model_key(job_id: &str, model_name: &str) -> String {
+    format!("{job_id}/{model_name}")
+}
+
+fn selected_additions(
+    desired: &HashSet<String>,
+    current: &HashSet<String>,
+) -> Vec<ModelGroupMember> {
+    desired
+        .difference(current)
+        .filter_map(|key| {
+            let (job_id, model_name) = key.split_once('/')?;
+            Some(ModelGroupMember {
+                job_id: job_id.to_owned(),
+                model_name: model_name.to_owned(),
+            })
+        })
+        .collect()
+}
+
+fn selected_removals(current: &HashSet<String>, desired: &HashSet<String>) -> Vec<String> {
+    current
+        .difference(desired)
+        .filter_map(|key| {
+            key.split_once('/')
+                .map(|(_, model_name)| model_name.to_owned())
+        })
+        .collect()
+}
+
+async fn update_group_models(
+    group_id: GroupId,
+    additions: Vec<ModelGroupMember>,
+    removals: Vec<String>,
+) -> Result<(), ServerFnError> {
+    for model_name in removals {
+        remove_model_from_group(group_id.clone(), model_name).await?;
+    }
+
+    if !additions.is_empty() {
+        add_models_to_group(group_id, additions).await?;
+    }
+
+    Ok(())
+}
+
 /// Dropdown panel showing all completed models in a grid; ticked if already in the group.
 fn model_picker(
     group: ModelGroup,
@@ -187,22 +226,27 @@ fn model_picker(
     mut grouping_busy: Signal<bool>,
     mut refresh_tick: Signal<u32>,
 ) -> Element {
-    let checked_count = checked_models.read().len();
-    let has_new = checked_count > 0;
+    let current_keys = group_member_keys(&group);
+    let desired_keys = checked_models.read().clone();
+    let additions_count = desired_keys.difference(&current_keys).count();
+    let removals_count = current_keys.difference(&desired_keys).count();
+    let change_count = additions_count + removals_count;
+    let has_changes = change_count > 0;
 
     let button_label = if *grouping_busy.read() {
-        "Adding…".to_owned()
-    } else if checked_count > 0 {
-        format!("Do Grouping Models ({checked_count})")
+        "Updating...".to_owned()
+    } else if has_changes {
+        format!("Update Models ({change_count})")
     } else {
-        "Do Grouping Models".to_owned()
+        "Update Models".to_owned()
     };
 
     let group_name = group.name.clone();
     let group_id = group.id.clone();
+    let current_keys_for_update = current_keys.clone();
 
     rsx! {
-        div { class: "mt-6 rounded-xl border border-slate-700/60 bg-slate-900/40 overflow-hidden",
+        div { class: "mt-8 rounded-xl border border-slate-700/60 bg-slate-900/40 overflow-hidden",
 
             // Panel header
             div { class: "flex items-center justify-between px-5 py-3 border-b border-slate-700/60 bg-slate-800/40",
@@ -215,24 +259,15 @@ fn model_picker(
                 button {
                     class: "px-4 py-1.5 rounded-lg text-sm font-medium text-white transition-all duration-200 disabled:opacity-40 disabled:cursor-not-allowed",
                     style: "background: linear-gradient(135deg, #0891b2, #0d9488);",
-                    disabled: !has_new || *grouping_busy.read(),
+                    disabled: !has_changes || *grouping_busy.read(),
                     onclick: move |_| {
                         let gid = group_id.clone();
-                        let members: Vec<ModelGroupMember> = checked_models
-                            .read()
-                            .iter()
-                            .filter_map(|key| {
-                                let (job_id, model_name) = key.split_once('/')?;
-                                Some(ModelGroupMember {
-                                    job_id: job_id.to_owned(),
-                                    model_name: model_name.to_owned(),
-                                })
-                            })
-                            .collect();
+                        let desired = checked_models.read().clone();
+                        let additions = selected_additions(&desired, &current_keys_for_update);
+                        let removals = selected_removals(&current_keys_for_update, &desired);
                         grouping_busy.set(true);
                         spawn(async move {
-                            let _ = add_models_to_group(gid, members).await;
-                            checked_models.write().clear();
+                            let _ = update_group_models(gid, additions, removals).await;
                             grouping_busy.set(false);
                             *refresh_tick.write() += 1;
                         });
@@ -272,43 +307,47 @@ fn model_picker(
                         div { class: "grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3",
                             for job in list {
                                 {
-                                    let key = format!("{}/{}", job.id, job.model_name);
+                                    let key = model_key(&job.id.to_string(), &job.model_name);
                                     let key_toggle = key.clone();
-                                    let in_group = group.members.iter().any(|m| m.model_name == job.model_name);
-                                    let selected = checked_models.read().contains(&key);
+                                    let in_group = current_keys.contains(&key);
+                                    let selected = desired_keys.contains(&key);
                                     let created = job.created_at.format("%b %d").to_string();
 
-                                    let (card_border, card_bg, indicator_style, is_interactive) = if in_group {
+                                    let (card_border, card_bg, indicator_style, model_text) = if in_group && selected {
                                         (
                                             "border-emerald-800/50",
                                             "bg-emerald-950/20",
                                             "background:#065f46;border-color:#065f46;",
-                                            false,
+                                            "text-emerald-300",
+                                        )
+                                    } else if in_group {
+                                        (
+                                            "border-amber-700/70",
+                                            "bg-amber-950/20",
+                                            "border-color:#d97706;",
+                                            "text-amber-200",
                                         )
                                     } else if selected {
                                         (
                                             "border-cyan-600",
                                             "bg-cyan-950/20",
                                             "background:#0891b2;border-color:#0891b2;",
-                                            true,
+                                            "text-cyan-200",
                                         )
                                     } else {
                                         (
                                             "border-slate-700/60",
                                             "hover:bg-slate-800/40",
                                             "border-color:#475569;",
-                                            true,
+                                            "text-slate-200",
                                         )
                                     };
-
-                                    let cursor = if is_interactive { "cursor-pointer" } else { "" };
 
                                     rsx! {
                                         div {
                                             key: "{key}",
-                                            class: "relative rounded-lg border p-3 transition-all duration-150 {card_border} {card_bg} {cursor}",
+                                            class: "relative rounded-lg border p-4 pr-8 cursor-pointer transition-all duration-150 {card_border} {card_bg}",
                                             onclick: move |_| {
-                                                if !is_interactive { return; }
                                                 let mut models = checked_models.write();
                                                 if models.contains(&key_toggle) {
                                                     models.remove(&key_toggle);
@@ -319,17 +358,16 @@ fn model_picker(
 
                                             // Indicator (top-right)
                                             div {
-                                                class: "absolute top-2 right-2 w-4 h-4 rounded border flex items-center justify-center flex-shrink-0",
-                                                style: "{indicator_style}",
-                                                if in_group || selected {
+                                                class: "w-4 h-4 rounded border flex items-center justify-center flex-shrink-0",
+                                                style: "position:absolute;top:0.625rem;right:0.625rem;z-index:1;{indicator_style}",
+                                                if selected {
                                                     span { class: "text-white text-[10px] leading-none font-bold", "✓" }
                                                 }
                                             }
 
                                             // Model info
                                             p {
-                                                class: "text-sm font-medium pr-5 truncate",
-                                                class: if in_group { "text-emerald-300" } else { "text-slate-200" },
+                                                class: "text-sm font-medium truncate {model_text}",
                                                 "{job.model_name}"
                                             }
                                             p { class: "text-xs text-slate-500 mt-0.5",

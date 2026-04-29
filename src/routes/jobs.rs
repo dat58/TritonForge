@@ -1,9 +1,9 @@
 //! Jobs list page with auto-refresh for in-progress conversions.
 
-use crate::api::list_all_jobs;
+use crate::api::{delete_job, list_all_jobs};
 use crate::app::Route;
 use crate::components::JobCard;
-use crate::models::job::JobStatus;
+use crate::models::job::{JobId, JobStatus};
 use dioxus::prelude::*;
 use futures_timer::Delay;
 use std::time::Duration;
@@ -117,7 +117,15 @@ pub fn JobsPage() -> Element {
                     Some(Ok(list)) => rsx! {
                         div { class: "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4",
                             for job in list {
-                                JobCard { job: job.clone() }
+                                JobCard {
+                                    job: job.clone(),
+                                    on_delete: move |id: JobId| {
+                                        spawn(async move {
+                                            let _ = delete_job(id.to_string()).await;
+                                            *tick.write() += 1;
+                                        });
+                                    },
+                                }
                             }
                         }
                         if list.len() == PAGE_SIZE as usize || *page_offset.read() > 0 {

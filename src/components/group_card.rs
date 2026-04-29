@@ -14,13 +14,11 @@ pub struct GroupCardProps {
     pub on_select: EventHandler<GroupId>,
     /// Called when the user confirms a rename.
     pub on_rename: EventHandler<(GroupId, String)>,
-    /// Called when the "Release" button is clicked (delete folder only).
+    /// Called when the "Delete" button is confirmed (release group folder and row only).
     pub on_release: EventHandler<GroupId>,
-    /// Called when the "Delete" button is confirmed (delete folder + source files).
-    pub on_delete: EventHandler<GroupId>,
 }
 
-/// A card representing a model group with inline rename and release/delete actions.
+/// A card representing a model group with inline rename and delete action.
 #[component]
 pub fn GroupCard(props: GroupCardProps) -> Element {
     let mut editing = use_signal(|| false);
@@ -29,7 +27,6 @@ pub fn GroupCard(props: GroupCardProps) -> Element {
 
     let group_id = props.group.id.clone();
     let group_id_release = props.group.id.clone();
-    let group_id_delete = props.group.id.clone();
 
     let member_count = props.group.members.len();
     let models_label = if member_count == 1 {
@@ -138,21 +135,15 @@ pub fn GroupCard(props: GroupCardProps) -> Element {
             }
 
             // Actions
-            div { class: "flex gap-2",
+            div { class: "flex",
                 onclick: move |evt| evt.stop_propagation(),
-
-                button {
-                    class: "flex-1 py-1.5 rounded-lg text-xs font-medium bg-amber-900/40 hover:bg-amber-800/60 text-amber-300 border border-amber-800/50 transition-all duration-200",
-                    onclick: move |_| props.on_release.call(group_id_release.clone()),
-                    "Release"
-                }
 
                 if *confirm_delete.read() {
                     button {
                         class: "flex-1 py-1.5 rounded-lg text-xs font-medium bg-rose-700 hover:bg-rose-600 text-white border border-rose-600 transition-all duration-200",
                         onclick: move |_| {
                             confirm_delete.set(false);
-                            props.on_delete.call(group_id_delete.clone());
+                            props.on_release.call(group_id_release.clone());
                         },
                         "Confirm?"
                     }
