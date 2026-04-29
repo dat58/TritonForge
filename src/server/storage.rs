@@ -13,11 +13,12 @@ const ZIP_LOCAL_FILE_HEADER: u32 = 0x0403_4b50;
 const ZIP_CENTRAL_DIRECTORY_HEADER: u32 = 0x0201_4b50;
 const ZIP_END_OF_CENTRAL_DIRECTORY: u32 = 0x0605_4b50;
 
-/// Manages all on-disk file operations for conversion jobs.
+/// Manages all on-disk file operations for conversion jobs and model groups.
 #[derive(Debug, Clone)]
 pub struct StorageService {
     upload_dir: PathBuf,
     output_dir: PathBuf,
+    groups_dir: PathBuf,
     max_upload_bytes: u64,
 }
 
@@ -32,6 +33,7 @@ impl StorageService {
         Self {
             upload_dir: config.upload_dir.clone(),
             output_dir: config.output_dir.clone(),
+            groups_dir: config.groups_dir.clone(),
             max_upload_bytes: config.max_upload_size_mb * 1024 * 1024,
         }
     }
@@ -124,6 +126,57 @@ impl StorageService {
         build_zip(files)
     }
 
+    /// Copies a model directory tree into a group directory.
+    ///
+    /// Source: `output_dir/{job_id}/{model_name}/`
+    /// Destination: `groups_dir/{group_name}/{model_name}/`
+    /// Returns the destination path.
+    #[instrument(skip(self), fields(job_id, model_name, group_name))]
+    pub async fn copy_model_to_group(
+        &self,
+        job_id: &str,
+        model_name: &str,
+        group_name: &str,
+    ) -> Result<PathBuf, AppError> {
+        let src = self.output_dir.join(job_id).join(model_name);
+        let dst = self.groups_dir.join(group_name).join(model_name);
+        copy_dir_all(&src, &dst).await?;
+        tracing::info!(dest = %dst.display(), "model copied to group");
+        Ok(dst)
+    }
+
+    /// Deletes the entire group directory (`groups_dir/{group_name}/`).
+    #[instrument(skip(self), fields(group_name))]
+    pub async fn delete_group_dir(&self, group_name: &str) -> Result<(), AppError> {
+        let dir = self.groups_dir.join(group_name);
+        match fs::remove_dir_all(&dir).await {
+            Ok(()) => {
+                tracing::info!(dir = %dir.display(), "group directory deleted");
+                Ok(())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Deletes a single job's model output directory (`output_dir/{job_id}/{model_name}/`).
+    #[instrument(skip(self), fields(job_id, model_name))]
+    pub async fn delete_job_output_dir(
+        &self,
+        job_id: &str,
+        model_name: &str,
+    ) -> Result<(), AppError> {
+        let dir = self.output_dir.join(job_id).join(model_name);
+        match fs::remove_dir_all(&dir).await {
+            Ok(()) => {
+                tracing::info!(dir = %dir.display(), "job output directory deleted");
+                Ok(())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Deletes a temporary file, ignoring the error if the file is already gone.
     #[instrument(skip(self), fields(path = %path.display()))]
     pub async fn cleanup_temp(&self, path: &Path) -> Result<(), AppError> {
@@ -136,6 +189,20 @@ impl StorageService {
             Err(e) => Err(e.into()),
         }
     }
+}
+
+async fn copy_dir_all(src: &Path, dst: &Path) -> Result<(), AppError> {
+    fs::create_dir_all(dst).await?;
+    let mut entries = fs::read_dir(src).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let entry_dst = dst.join(entry.file_name());
+        if entry.metadata().await?.is_dir() {
+            Box::pin(copy_dir_all(&entry.path(), &entry_dst)).await?;
+        } else {
+            fs::copy(entry.path(), entry_dst).await?;
+        }
+    }
+    Ok(())
 }
 
 fn validate_extension(filename: &str) -> Result<(), AppError> {
