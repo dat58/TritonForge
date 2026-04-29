@@ -35,7 +35,7 @@ pub fn GroupCard(props: GroupCardProps) -> Element {
         format!("{member_count} models")
     };
     let dir = props.group.dir_path.to_string_lossy().to_string();
-    let created = props.group.created_at.format("%b %d, %Y").to_string();
+    let created = props.group.created_at.format("%b %d, %Y %H:%M").to_string();
 
     let border_class = if props.selected {
         "glass-card p-5 border-cyan-500 cursor-pointer"
