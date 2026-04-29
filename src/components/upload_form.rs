@@ -1,22 +1,32 @@
 //! Model upload and conversion submission form.
 
-use crate::api::submit_job;
+use crate::api::{inspect_onnx_path, submit_job};
 use crate::app::Route;
 use crate::components::{GpuSelector, ImageSelector};
 use crate::models::config::GpuId;
-use crate::models::job::{SubmitJobRequest, TrtOptions};
+use crate::models::job::{ModelInputSource, SubmitJobRequest, TrtOptions};
 use crate::onnx::{OnnxTensorInfo, parse_onnx_inputs};
 use dioxus::prelude::*;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UploadSource {
+    BrowserFile,
+    ServerPath,
+}
 
 /// Main upload form for submitting a new TensorRT conversion job.
 #[component]
 pub fn UploadForm() -> Element {
+    let mut upload_source = use_signal(|| UploadSource::BrowserFile);
     let mut file_bytes: Signal<Option<Vec<u8>>> = use_signal(|| None);
     let mut file_name = use_signal(String::new);
     let mut file_size: Signal<Option<u64>> = use_signal(|| None);
     let mut file_load_progress: Signal<Option<u8>> = use_signal(|| None);
     let mut file_load_error: Signal<Option<String>> = use_signal(|| None);
+    let mut server_model_path = use_signal(String::new);
+    let mut inspecting_path = use_signal(|| false);
     let mut model_name = use_signal(String::new);
+    let mut model_name_touched = use_signal(|| false);
     let mut model_version = use_signal(|| 1u32);
     let mut selected_gpu: Signal<Option<GpuId>> = use_signal(|| None);
     let mut selected_image: Signal<Option<String>> = use_signal(|| None);
@@ -35,7 +45,12 @@ pub fn UploadForm() -> Element {
 
     let nav = use_navigator();
 
-    let can_submit = file_bytes.read().is_some()
+    let source_ready = model_source_ready(
+        *upload_source.read(),
+        file_bytes.read().is_some(),
+        server_model_path.read().trim(),
+    );
+    let can_submit = source_ready
         && !model_name.read().trim().is_empty()
         && *model_version.read() > 0
         && selected_gpu.read().is_some()
@@ -44,102 +59,184 @@ pub fn UploadForm() -> Element {
     rsx! {
         div { class: "flex flex-col gap-7",
 
-            // ── File drop zone ───────────────────────────────────────────
-            div { class: "flex flex-col gap-2",
-                label { class: "text-xs font-semibold uppercase tracking-wider text-slate-400",
-                    "Model File"
-                }
-                label {
-                    class: "relative flex flex-col items-center justify-center w-full h-36 rounded-xl cursor-pointer border-2 border-dashed transition-all duration-300 group",
-                    style: if file_bytes.read().is_some() {
-                        "border-color: #0d9488; background: rgba(13,148,136,0.05);"
-                    } else {
-                        "border-color: #334155; background: rgba(30,41,59,0.3);"
+            div { class: "grid grid-cols-2 gap-2 rounded-xl border border-slate-800 bg-slate-900/40 p-1",
+                button {
+                    r#type: "button",
+                    class: source_button_class(*upload_source.read() == UploadSource::BrowserFile),
+                    onclick: move |_| {
+                        upload_source.set(UploadSource::BrowserFile);
+                        error_msg.set(None);
                     },
-                    input {
-                        r#type: "file",
-                        class: "hidden",
-                        accept: ".onnx",
-                        onchange: move |evt| {
-                            let data = evt.data();
-                            let files = data.files();
-                            file_load_error.set(None);
-                            file_bytes.set(None);
-                            file_load_progress.set(None);
-                            min_shapes.set(String::new());
-                            opt_shapes.set(String::new());
-                            max_shapes.set(String::new());
-                            spawn(async move {
-                                let Some(file) = files.into_iter().next() else { return };
-                                let name = file.name();
-                                let size = file.size();
-                                file_name.set(name.clone());
-                                file_size.set(Some(size));
-                                file_load_progress.set(Some(0));
-                                model_name.set(strip_onnx_extension(&name));
+                    "Upload file"
+                }
+                button {
+                    r#type: "button",
+                    class: source_button_class(*upload_source.read() == UploadSource::ServerPath),
+                    onclick: move |_| {
+                        upload_source.set(UploadSource::ServerPath);
+                        error_msg.set(None);
+                    },
+                    "Server path"
+                }
+            }
 
-                                match read_selected_file(file, file_load_progress).await {
-                                    Ok(bytes) => {
-                                        file_load_progress.set(Some(100));
-                                        let inputs =
-                                            parse_onnx_inputs(&bytes).unwrap_or_default();
-                                        min_shapes.set(make_shapes_hint(&inputs, 1));
-                                        opt_shapes.set(make_shapes_hint(&inputs, 4));
-                                        max_shapes.set(make_shapes_hint(&inputs, 8));
-                                        file_bytes.set(Some(bytes));
+            if *upload_source.read() == UploadSource::BrowserFile {
+                div { class: "flex flex-col gap-2",
+                    label { class: "text-xs font-semibold uppercase tracking-wider text-slate-400",
+                        "Model File"
+                    }
+                    label {
+                        class: "relative flex flex-col items-center justify-center w-full h-36 rounded-xl cursor-pointer border-2 border-dashed transition-all duration-300 group",
+                        style: if file_bytes.read().is_some() {
+                            "border-color: #0d9488; background: rgba(13,148,136,0.05);"
+                        } else {
+                            "border-color: #334155; background: rgba(30,41,59,0.3);"
+                        },
+                        input {
+                            r#type: "file",
+                            class: "hidden",
+                            accept: ".onnx",
+                            onchange: move |evt| {
+                                let data = evt.data();
+                                let files = data.files();
+                                file_load_error.set(None);
+                                file_bytes.set(None);
+                                file_load_progress.set(None);
+                                min_shapes.set(String::new());
+                                opt_shapes.set(String::new());
+                                max_shapes.set(String::new());
+                                spawn(async move {
+                                    let Some(file) = files.into_iter().next() else { return };
+                                    let name = file.name();
+                                    let size = file.size();
+                                    file_name.set(name.clone());
+                                    file_size.set(Some(size));
+                                    file_load_progress.set(Some(0));
+                                    if !*model_name_touched.read() {
+                                        model_name.set(file_stem_from_path(&name));
                                     }
-                                    Err(e) => {
-                                        file_size.set(None);
-                                        file_load_progress.set(None);
-                                        file_load_error.set(Some(format!(
-                                            "Could not read file: {e}"
-                                        )));
+
+                                    match read_selected_file(file, file_load_progress).await {
+                                        Ok(bytes) => {
+                                            file_load_progress.set(Some(100));
+                                            let inputs =
+                                                parse_onnx_inputs(&bytes).unwrap_or_default();
+                                            apply_shape_hints(&inputs, min_shapes, opt_shapes, max_shapes);
+                                            file_bytes.set(Some(bytes));
+                                        }
+                                        Err(e) => {
+                                            file_size.set(None);
+                                            file_load_progress.set(None);
+                                            file_load_error.set(Some(format!(
+                                                "Could not read file: {e}"
+                                            )));
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                        if file_bytes.read().is_some() {
+                            div { class: "flex flex-col items-center gap-1 pointer-events-none",
+                                div {
+                                    class: "w-10 h-10 rounded-xl flex items-center justify-center mb-1",
+                                    style: "background: linear-gradient(135deg, #0891b2, #0d9488);",
+                                    span { class: "text-white text-lg", "✓" }
+                                }
+                                span { class: "text-teal-300 font-medium text-sm", "{file_name}" }
+                                span { class: "text-slate-500 text-xs",
+                                    {format_file_size(file_size.read().unwrap_or(0))}
+                                }
+                            }
+                        } else if let Some(progress) = *file_load_progress.read() {
+                            div { class: "flex flex-col items-center gap-2 pointer-events-none w-full px-8",
+                                div { class: "w-10 h-10 rounded-xl bg-slate-800 flex items-center justify-center mb-1",
+                                    div { class: "w-4 h-4 border-2 border-cyan-300/70 border-t-cyan-300 rounded-full animate-spin" }
+                                }
+                                span { class: "text-slate-300 font-medium text-sm", "{file_name}" }
+                                span { class: "text-slate-500 text-xs",
+                                    "Reading {format_file_size(file_size.read().unwrap_or(0))}"
+                                }
+                                div { class: "w-full h-1.5 rounded-full bg-slate-800 overflow-hidden",
+                                    div {
+                                        class: "h-full rounded-full bg-cyan-400 transition-all",
+                                        style: "width: {progress}%;",
                                     }
                                 }
-                            });
+                            }
+                        } else {
+                            div { class: "flex flex-col items-center gap-1.5 pointer-events-none",
+                                div { class: "w-10 h-10 rounded-xl bg-slate-800 flex items-center justify-center mb-1 group-hover:bg-slate-700 transition-colors",
+                                    span { class: "text-slate-400 text-xl group-hover:text-cyan-400 transition-colors", "↑" }
+                                }
+                                span { class: "text-slate-300 text-sm font-medium", "Click to select model file" }
+                                span { class: "text-slate-600 text-xs", ".onnx" }
+                            }
                         }
                     }
-                    if file_bytes.read().is_some() {
-                        div { class: "flex flex-col items-center gap-1 pointer-events-none",
-                            div {
-                                class: "w-10 h-10 rounded-xl flex items-center justify-center mb-1",
-                                style: "background: linear-gradient(135deg, #0891b2, #0d9488);",
-                                span { class: "text-white text-lg", "✓" }
-                            }
-                            span { class: "text-teal-300 font-medium text-sm", "{file_name}" }
-                            span { class: "text-slate-500 text-xs",
-                                {format_file_size(file_size.read().unwrap_or(0))}
-                            }
-                        }
-                    } else if let Some(progress) = *file_load_progress.read() {
-                        div { class: "flex flex-col items-center gap-2 pointer-events-none w-full px-8",
-                            div { class: "w-10 h-10 rounded-xl bg-slate-800 flex items-center justify-center mb-1",
-                                div { class: "w-4 h-4 border-2 border-cyan-300/70 border-t-cyan-300 rounded-full animate-spin" }
-                            }
-                            span { class: "text-slate-300 font-medium text-sm", "{file_name}" }
-                            span { class: "text-slate-500 text-xs",
-                                "Reading {format_file_size(file_size.read().unwrap_or(0))}"
-                            }
-                            div { class: "w-full h-1.5 rounded-full bg-slate-800 overflow-hidden",
-                                div {
-                                    class: "h-full rounded-full bg-cyan-400 transition-all",
-                                    style: "width: {progress}%;",
-                                }
-                            }
-                        }
-                    } else {
-                        div { class: "flex flex-col items-center gap-1.5 pointer-events-none",
-                            div { class: "w-10 h-10 rounded-xl bg-slate-800 flex items-center justify-center mb-1 group-hover:bg-slate-700 transition-colors",
-                                span { class: "text-slate-400 text-xl group-hover:text-cyan-400 transition-colors", "↑" }
-                            }
-                            span { class: "text-slate-300 text-sm font-medium", "Click to select model file" }
-                            span { class: "text-slate-600 text-xs", ".onnx" }
+                    if let Some(ref msg) = *file_load_error.read() {
+                        div { class: "rounded-lg px-3 py-2 text-rose-400 text-xs border border-rose-800/50 bg-rose-950/30",
+                            "{msg}"
                         }
                     }
                 }
-                if let Some(ref msg) = *file_load_error.read() {
-                    div { class: "rounded-lg px-3 py-2 text-rose-400 text-xs border border-rose-800/50 bg-rose-950/30",
-                        "{msg}"
+            } else {
+                div { class: "flex flex-col gap-2",
+                    label { class: "text-xs font-semibold uppercase tracking-wider text-slate-400",
+                        "Server ONNX Path"
+                    }
+                    div { class: "flex flex-col sm:flex-row gap-2",
+                        input {
+                            r#type: "text",
+                            class: "field flex-1",
+                            placeholder: "/models/resnet50.onnx",
+                            value: "{server_model_path}",
+                            oninput: move |evt| {
+                                let value = evt.value();
+                                server_model_path.set(value.clone());
+                                file_load_error.set(None);
+                                min_shapes.set(String::new());
+                                opt_shapes.set(String::new());
+                                max_shapes.set(String::new());
+                                if !*model_name_touched.read() {
+                                    model_name.set(file_stem_from_path(&value));
+                                }
+                            }
+                        }
+                        button {
+                            r#type: "button",
+                            class: "px-4 py-2.5 rounded-xl font-semibold text-sm text-slate-100 bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed",
+                            disabled: server_model_path.read().trim().is_empty() || *inspecting_path.read(),
+                            onclick: move |_| {
+                                if server_model_path.read().trim().is_empty() || *inspecting_path.read() {
+                                    return;
+                                }
+                                let path = server_model_path.read().trim().to_owned();
+                                inspecting_path.set(true);
+                                file_load_error.set(None);
+                                spawn(async move {
+                                    match inspect_onnx_path(path.clone()).await {
+                                        Ok(inputs) => {
+                                            apply_shape_hints(&inputs, min_shapes, opt_shapes, max_shapes);
+                                            if !*model_name_touched.read() {
+                                                model_name.set(file_stem_from_path(&path));
+                                            }
+                                        }
+                                        Err(e) => file_load_error.set(Some(e.to_string())),
+                                    }
+                                    inspecting_path.set(false);
+                                });
+                            },
+                            if *inspecting_path.read() {
+                                "Inspecting..."
+                            } else {
+                                "Inspect"
+                            }
+                        }
+                    }
+                    if let Some(ref msg) = *file_load_error.read() {
+                        div { class: "rounded-lg px-3 py-2 text-rose-400 text-xs border border-rose-800/50 bg-rose-950/30",
+                            "{msg}"
+                        }
                     }
                 }
             }
@@ -155,7 +252,10 @@ pub fn UploadForm() -> Element {
                         class: "field",
                         placeholder: "resnet50",
                         value: "{model_name}",
-                        oninput: move |evt| model_name.set(evt.value()),
+                        oninput: move |evt| {
+                            model_name_touched.set(true);
+                            model_name.set(evt.value());
+                        },
                     }
                 }
                 div { class: "flex flex-col gap-1.5",
@@ -298,7 +398,7 @@ pub fn UploadForm() -> Element {
             // ── Checklist ─────────────────────────────────────────────────
             div { class: "grid grid-cols-2 gap-2 text-xs",
                 for (done, lbl) in [
-                    (file_bytes.read().is_some(),        "Model file"),
+                    (source_ready,                         "Model source"),
                     (!model_name.read().trim().is_empty(), "Model name"),
                     (*model_version.read() > 0,          "Version"),
                     (selected_gpu.read().is_some(),      "GPU"),
@@ -324,7 +424,18 @@ pub fn UploadForm() -> Element {
                 disabled: !can_submit || *submitting.read(),
                 onclick: move |_| {
                     if !can_submit || *submitting.read() { return; }
-                    let Some(bytes) = file_bytes.read().clone() else { return; };
+                    let (model_data, input_source) = match *upload_source.read() {
+                        UploadSource::BrowserFile => {
+                            let Some(bytes) = file_bytes.read().clone() else { return; };
+                            (Some(bytes), ModelInputSource::UploadedFile)
+                        }
+                        UploadSource::ServerPath => (
+                            None,
+                            ModelInputSource::ServerPath {
+                                path: server_model_path.read().trim().to_owned(),
+                            },
+                        ),
+                    };
                     let name = model_name.read().trim().to_owned();
                     let version = *model_version.read();
                     let Some(gpu) = *selected_gpu.read() else { return; };
@@ -342,6 +453,7 @@ pub fn UploadForm() -> Element {
                     };
 
                     let req = SubmitJobRequest {
+                        input_source,
                         model_name: name,
                         model_version: version,
                         image_tag: img,
@@ -353,7 +465,7 @@ pub fn UploadForm() -> Element {
                     error_msg.set(None);
 
                     spawn(async move {
-                        match submit_job(bytes, req).await {
+                        match submit_job(model_data, req).await {
                             Ok(job_id) => {
                                 let _ = nav.push(Route::JobDetail { id: job_id.to_string() });
                             }
@@ -393,15 +505,6 @@ fn format_file_size(bytes: u64) -> String {
     }
 }
 
-fn strip_onnx_extension(name: &str) -> String {
-    let stripped = name.trim_end_matches(".onnx");
-    if stripped.is_empty() {
-        name.to_owned()
-    } else {
-        stripped.to_owned()
-    }
-}
-
 fn submit_btn_style(can_submit: bool, submitting: bool) -> &'static str {
     if submitting {
         "background: linear-gradient(135deg, #0e7490, #0f766e); color: white; opacity: 0.7; cursor: not-allowed;"
@@ -409,6 +512,46 @@ fn submit_btn_style(can_submit: bool, submitting: bool) -> &'static str {
         "background: linear-gradient(135deg, #0891b2, #0d9488); color: white; cursor: pointer; box-shadow: 0 4px 20px rgba(6,182,212,0.3);"
     } else {
         "background: #1e293b; color: #475569; cursor: not-allowed;"
+    }
+}
+
+fn source_button_class(selected: bool) -> &'static str {
+    if selected {
+        "rounded-lg px-3 py-2 text-sm font-semibold text-white bg-cyan-700"
+    } else {
+        "rounded-lg px-3 py-2 text-sm font-semibold text-slate-400 hover:text-slate-200"
+    }
+}
+
+fn model_source_ready(source: UploadSource, has_file: bool, server_path: &str) -> bool {
+    match source {
+        UploadSource::BrowserFile => has_file,
+        UploadSource::ServerPath => !server_path.trim().is_empty(),
+    }
+}
+
+fn apply_shape_hints(
+    inputs: &[OnnxTensorInfo],
+    mut min_shapes: Signal<String>,
+    mut opt_shapes: Signal<String>,
+    mut max_shapes: Signal<String>,
+) {
+    min_shapes.set(make_shapes_hint(inputs, 1));
+    opt_shapes.set(make_shapes_hint(inputs, 4));
+    max_shapes.set(make_shapes_hint(inputs, 8));
+}
+
+fn file_stem_from_path(path: &str) -> String {
+    let name = path
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|value| !value.is_empty())
+        .unwrap_or(path);
+    let lower = name.to_ascii_lowercase();
+    if lower.ends_with(".onnx") && name.len() > 5 {
+        name[..name.len() - 5].to_owned()
+    } else {
+        name.to_owned()
     }
 }
 

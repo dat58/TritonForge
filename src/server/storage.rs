@@ -79,6 +79,40 @@ impl StorageService {
         Ok((saved_path, file_size))
     }
 
+    /// Copies an existing server-side ONNX model into the upload staging directory.
+    ///
+    /// The source path must point to a readable regular `.onnx` file and must fit
+    /// within the configured upload size limit.
+    #[instrument(skip(self), fields(source_path = %source_path.display()))]
+    pub async fn copy_server_model_to_uploads(
+        &self,
+        source_path: &Path,
+    ) -> Result<(PathBuf, u64), AppError> {
+        validate_server_model_path(source_path).await?;
+        let file_size = validate_file_size(source_path, self.max_upload_bytes).await?;
+
+        fs::create_dir_all(&self.upload_dir).await?;
+        let saved_path = self.upload_dir.join(format!("{}.onnx", Uuid::new_v4()));
+        fs::copy(source_path, &saved_path).await?;
+
+        tracing::info!(
+            file_size,
+            source = %source_path.display(),
+            path = %saved_path.display(),
+            "server model copied to uploads"
+        );
+
+        Ok((saved_path, file_size))
+    }
+
+    /// Reads an existing server-side ONNX model after applying upload validation.
+    #[instrument(skip(self), fields(source_path = %source_path.display()))]
+    pub async fn read_server_model(&self, source_path: &Path) -> Result<Vec<u8>, AppError> {
+        validate_server_model_path(source_path).await?;
+        validate_file_size(source_path, self.max_upload_bytes).await?;
+        fs::read(source_path).await.map_err(AppError::Io)
+    }
+
     /// Moves a completed plan file into Triton's model repository layout.
     ///
     /// Output is organised as `output_dir/{job_id}/{model_name}/{version}/model.plan`.
@@ -246,13 +280,38 @@ fn validate_extension(filename: &str) -> Result<(), AppError> {
     let ext = Path::new(filename)
         .extension()
         .and_then(|e| e.to_str())
-        .unwrap_or("");
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
 
-    if ALLOWED_EXTENSIONS.contains(&ext) {
+    if ALLOWED_EXTENSIONS.contains(&ext.as_str()) {
         Ok(())
     } else {
         Err(AppError::Validation(format!(
             "unsupported file extension '.{ext}'; allowed: {ALLOWED_EXTENSIONS:?}"
+        )))
+    }
+}
+
+async fn validate_server_model_path(source_path: &Path) -> Result<(), AppError> {
+    validate_extension(source_path.to_string_lossy().as_ref())?;
+    let metadata = fs::metadata(source_path).await?;
+    if metadata.is_file() {
+        Ok(())
+    } else {
+        Err(AppError::Validation(format!(
+            "model path '{}' is not a regular file",
+            source_path.display()
+        )))
+    }
+}
+
+async fn validate_file_size(source_path: &Path, max_upload_bytes: u64) -> Result<u64, AppError> {
+    let file_size = fs::metadata(source_path).await?.len();
+    if file_size <= max_upload_bytes {
+        Ok(file_size)
+    } else {
+        Err(AppError::Validation(format!(
+            "file size {file_size} bytes exceeds maximum {max_upload_bytes} bytes"
         )))
     }
 }
@@ -436,6 +495,7 @@ mod tests {
     #[test]
     fn validate_extension_accepts_onnx() {
         assert!(validate_extension("model.onnx").is_ok());
+        assert!(validate_extension("MODEL.ONNX").is_ok());
     }
 
     #[test]
@@ -446,5 +506,80 @@ mod tests {
     #[test]
     fn validate_extension_rejects_savedmodel() {
         assert!(validate_extension("model.savedmodel").is_err());
+    }
+
+    #[tokio::test]
+    async fn copy_server_model_to_uploads_copies_valid_onnx() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source_path = temp.path().join("MODEL.ONNX");
+        tokio::fs::write(&source_path, b"onnx-bytes")
+            .await
+            .expect("write source");
+        let storage = test_storage(temp.path(), 1);
+
+        let (copied_path, file_size) = storage
+            .copy_server_model_to_uploads(&source_path)
+            .await
+            .expect("copy server model");
+
+        assert_eq!(file_size, 10);
+        assert!(copied_path.starts_with(temp.path().join("uploads")));
+        assert_eq!(
+            tokio::fs::read(copied_path).await.expect("read copied"),
+            b"onnx-bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn copy_server_model_to_uploads_rejects_invalid_extension() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source_path = temp.path().join("model.bin");
+        tokio::fs::write(&source_path, b"onnx-bytes")
+            .await
+            .expect("write source");
+        let storage = test_storage(temp.path(), 1);
+
+        let result = storage.copy_server_model_to_uploads(&source_path).await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn copy_server_model_to_uploads_rejects_directory() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source_path = temp.path().join("model.onnx");
+        tokio::fs::create_dir(&source_path)
+            .await
+            .expect("create source directory");
+        let storage = test_storage(temp.path(), 1);
+
+        let result = storage.copy_server_model_to_uploads(&source_path).await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn copy_server_model_to_uploads_rejects_oversized_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source_path = temp.path().join("model.onnx");
+        tokio::fs::write(&source_path, b"x")
+            .await
+            .expect("write source");
+        let storage = test_storage(temp.path(), 0);
+
+        let result = storage.copy_server_model_to_uploads(&source_path).await;
+
+        assert!(result.is_err());
+    }
+
+    fn test_storage(root: &Path, max_upload_size_mb: u64) -> StorageService {
+        StorageService::new(&AppConfig {
+            upload_dir: root.join("uploads"),
+            output_dir: root.join("outputs"),
+            max_upload_size_mb,
+            conversion_timeout_secs: 1800,
+            docker_socket: PathBuf::from("/var/run/docker.sock"),
+            groups_dir: root.join("groups"),
+        })
     }
 }

@@ -137,11 +137,30 @@ impl Default for TrtOptions {
 /// Request payload for submitting a new conversion job.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SubmitJobRequest {
+    /// Source used to stage the ONNX model before conversion.
+    pub input_source: ModelInputSource,
+    /// Human-readable model name used for output directory naming.
     pub model_name: String,
+    /// Triton model version directory name.
     pub model_version: u32,
+    /// Docker image tag for the TensorRT container.
     pub image_tag: String,
+    /// GPU device index to run conversion on.
     pub gpu_id: u32,
+    /// TensorRT conversion options.
     pub trt_options: TrtOptions,
+}
+
+/// Model source selected on the upload page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelInputSource {
+    /// Browser-uploaded ONNX bytes sent with the job request.
+    UploadedFile,
+    /// Existing ONNX file path readable by the server process.
+    ServerPath {
+        /// Path to an ONNX model on the server filesystem.
+        path: String,
+    },
 }
 
 // Import GpuId here to avoid circular dependency in the struct definition

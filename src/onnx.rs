@@ -4,6 +4,7 @@
 //! [`parse_onnx_inputs`] function used by the upload form to derive
 //! placeholder text for the trtexec shape arguments.
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 // ── ONNX / protobuf field numbers ────────────────────────────────────────────
@@ -26,7 +27,7 @@ pub(crate) const DIM_PARAM_FIELD: u32 = 2;
 /// Name and shape dimensions for one ONNX input tensor.
 ///
 /// Dynamic axes are represented as `−1` (matching ONNX convention).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OnnxTensorInfo {
     /// Tensor name as declared in the ONNX graph.
     pub name: String,

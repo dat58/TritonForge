@@ -11,6 +11,7 @@ use dioxus::prelude::*;
 use crate::models::config::{GpuInfo, TensorRtImage};
 use crate::models::group::{GroupId, ModelGroup, ModelGroupMember};
 use crate::models::job::{ConversionJob, JobId, SubmitJobRequest};
+use crate::onnx::OnnxTensorInfo;
 
 // ---------------------------------------------------------------------------
 // Server-only imports, state, and helpers
@@ -21,11 +22,12 @@ use {
     crate::errors::AppError,
     crate::models::config::{AppConfig, GpuId, load_dotenv},
     crate::models::group::random_mythology_name,
-    crate::models::job::{JobStatus, ModelFormat, TrtOptions},
+    crate::models::job::{JobStatus, ModelFormat, ModelInputSource, TrtOptions},
     crate::server::db::{self, DbPool},
     crate::server::docker::DockerService,
     crate::server::storage::StorageService,
     std::collections::HashSet,
+    std::path::PathBuf,
     tokio::sync::OnceCell,
 };
 
@@ -109,6 +111,11 @@ fn validate_submit_request(req: &SubmitJobRequest) -> Result<(), AppError> {
             "model version must be at least 1".into(),
         ));
     }
+    if let ModelInputSource::ServerPath { path } = &req.input_source
+        && path.trim().is_empty()
+    {
+        return Err(AppError::Validation("model path cannot be empty".into()));
+    }
     Ok(())
 }
 
@@ -125,6 +132,29 @@ fn validate_model_name(name: &str) -> Result<(), AppError> {
         Err(AppError::Validation(
             "model name must contain only letters, numbers, '.', '_', or '-'".into(),
         ))
+    }
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
+async fn stage_model_input(
+    storage: &StorageService,
+    model_data: Option<Vec<u8>>,
+    req: &SubmitJobRequest,
+) -> Result<PathBuf, AppError> {
+    match &req.input_source {
+        ModelInputSource::UploadedFile => {
+            let data = model_data
+                .ok_or_else(|| AppError::Validation("uploaded model data is required".into()))?;
+            let filename = format!("{}.onnx", req.model_name);
+            storage
+                .save_upload(&filename, &data)
+                .await
+                .map(|(path, _)| path)
+        }
+        ModelInputSource::ServerPath { path } => storage
+            .copy_server_model_to_uploads(&PathBuf::from(path.trim()))
+            .await
+            .map(|(path, _)| path),
     }
 }
 
@@ -210,7 +240,7 @@ pub async fn get_available_gpus() -> Result<Vec<GpuInfo>, ServerFnError> {
 #[server(input = Cbor, output = Cbor)]
 #[tracing::instrument(skip_all, fields(model_name = %req.model_name, image_tag = %req.image_tag))]
 pub async fn submit_job(
-    model_data: Vec<u8>,
+    model_data: Option<Vec<u8>>,
     req: SubmitJobRequest,
 ) -> Result<JobId, ServerFnError> {
     validate_submit_request(&req).map_err(to_server_err)?;
@@ -252,9 +282,7 @@ pub async fn submit_job(
         }
     }
 
-    let filename = format!("{}.onnx", req.model_name);
-    let (model_path, _) = storage
-        .save_upload(&filename, &model_data)
+    let model_path = stage_model_input(&storage, model_data, &req)
         .await
         .map_err(to_server_err)?;
 
@@ -298,6 +326,19 @@ pub async fn submit_job(
     });
 
     Ok(job_id)
+}
+
+/// Returns ONNX input tensors for a model path readable by the server.
+#[server(input = Cbor, output = Cbor)]
+#[tracing::instrument(skip_all, fields(model_path))]
+pub async fn inspect_onnx_path(model_path: String) -> Result<Vec<OnnxTensorInfo>, ServerFnError> {
+    let storage = storage_service();
+    let path = PathBuf::from(model_path.trim());
+    let bytes = storage
+        .read_server_model(&path)
+        .await
+        .map_err(to_server_err)?;
+    crate::onnx::parse_onnx_inputs(&bytes).map_err(to_server_err)
 }
 
 /// Returns the current state of a single conversion job.
