@@ -46,7 +46,7 @@ pub struct ModelGroupMember {
 }
 
 /// A named collection of TRT models copied into a shared deployment directory.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelGroup {
     /// Unique identifier for this group.
     pub id: GroupId,
