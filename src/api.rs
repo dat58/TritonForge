@@ -9,6 +9,7 @@ use dioxus::prelude::*;
 
 // Shared types used in the function signatures (compiled on all targets).
 use crate::models::config::{GpuInfo, TensorRtImage};
+use crate::models::group::{GroupId, ModelGroup, ModelGroupMember};
 use crate::models::job::{ConversionJob, JobId, SubmitJobRequest};
 
 // ---------------------------------------------------------------------------
@@ -19,6 +20,7 @@ use crate::models::job::{ConversionJob, JobId, SubmitJobRequest};
 use {
     crate::errors::AppError,
     crate::models::config::{AppConfig, GpuId, load_dotenv},
+    crate::models::group::random_mythology_name,
     crate::models::job::{ModelFormat, TrtOptions},
     crate::server::db::{self, DbPool},
     crate::server::docker::DockerService,
@@ -421,4 +423,175 @@ pub async fn cancel_job(job_id: String) -> Result<(), ServerFnError> {
     db::update_job_failed(pool, &jid, "cancelled by user")
         .await
         .map_err(to_server_err)
+}
+
+// ── Model group server functions ──────────────────────────────────────────────
+
+/// Creates a new model group, defaulting to a random mythology name.
+#[server]
+pub async fn create_model_group(name: Option<String>) -> Result<ModelGroup, ServerFnError> {
+    #[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
+    {
+        let pool = db_pool().await.map_err(to_server_err)?;
+        let storage = storage_service();
+        let group_name = name
+            .map(|n| n.trim().to_owned())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(random_mythology_name);
+        let dir_path = storage.groups_dir().join(&group_name);
+        let now = chrono::Utc::now();
+        let group = ModelGroup {
+            id: GroupId::new(),
+            name: group_name,
+            dir_path,
+            members: Vec::new(),
+            created_at: now,
+            updated_at: now,
+        };
+        db::insert_group(pool, &group).await.map_err(to_server_err)?;
+        Ok(group)
+    }
+    #[cfg(not(all(not(target_arch = "wasm32"), feature = "server")))]
+    unreachable!()
+}
+
+/// Returns all model groups ordered by creation time (newest first).
+#[server]
+pub async fn list_model_groups() -> Result<Vec<ModelGroup>, ServerFnError> {
+    #[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
+    {
+        let pool = db_pool().await.map_err(to_server_err)?;
+        db::list_groups(pool).await.map_err(to_server_err)
+    }
+    #[cfg(not(all(not(target_arch = "wasm32"), feature = "server")))]
+    unreachable!()
+}
+
+/// Renames an existing group.
+#[server]
+pub async fn rename_model_group(
+    group_id: GroupId,
+    name: String,
+) -> Result<(), ServerFnError> {
+    #[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
+    {
+        let trimmed = name.trim().to_owned();
+        if trimmed.is_empty() {
+            return Err(ServerFnError::new("group name cannot be empty"));
+        }
+        let pool = db_pool().await.map_err(to_server_err)?;
+        db::update_group_name(pool, &group_id, &trimmed)
+            .await
+            .map_err(to_server_err)
+    }
+    #[cfg(not(all(not(target_arch = "wasm32"), feature = "server")))]
+    unreachable!()
+}
+
+/// Copies selected models into a group and records the membership.
+#[server]
+pub async fn add_models_to_group(
+    group_id: GroupId,
+    members: Vec<ModelGroupMember>,
+) -> Result<ModelGroup, ServerFnError> {
+    #[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
+    {
+        let pool = db_pool().await.map_err(to_server_err)?;
+        let storage = storage_service();
+        let group = db::get_group(pool, &group_id).await.map_err(to_server_err)?;
+
+        for member in &members {
+            if group.members.iter().any(|m| m.model_name == member.model_name) {
+                return Err(ServerFnError::new(format!(
+                    "model '{}' already exists in group '{}'",
+                    member.model_name, group.name
+                )));
+            }
+        }
+
+        for member in &members {
+            storage
+                .copy_model_to_group(&member.job_id, &member.model_name, &group.name)
+                .await
+                .map_err(to_server_err)?;
+            db::add_group_member(pool, &group_id, member)
+                .await
+                .map_err(to_server_err)?;
+        }
+
+        db::get_group(pool, &group_id).await.map_err(to_server_err)
+    }
+    #[cfg(not(all(not(target_arch = "wasm32"), feature = "server")))]
+    unreachable!()
+}
+
+/// Removes a model from a group (DB record only — no file deletion).
+#[server]
+pub async fn remove_model_from_group(
+    group_id: GroupId,
+    model_name: String,
+) -> Result<(), ServerFnError> {
+    #[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
+    {
+        let pool = db_pool().await.map_err(to_server_err)?;
+        db::remove_group_member(pool, &group_id, &model_name)
+            .await
+            .map_err(to_server_err)
+    }
+    #[cfg(not(all(not(target_arch = "wasm32"), feature = "server")))]
+    unreachable!()
+}
+
+/// Deletes the group's storage directory and the DB record (source files are preserved).
+#[server]
+pub async fn release_model_group(group_id: GroupId) -> Result<(), ServerFnError> {
+    #[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
+    {
+        let pool = db_pool().await.map_err(to_server_err)?;
+        let storage = storage_service();
+        let group = db::get_group(pool, &group_id).await.map_err(to_server_err)?;
+        storage
+            .delete_group_dir(&group.name)
+            .await
+            .map_err(to_server_err)?;
+        db::delete_group(pool, &group_id).await.map_err(to_server_err)
+    }
+    #[cfg(not(all(not(target_arch = "wasm32"), feature = "server")))]
+    unreachable!()
+}
+
+/// Deletes the group directory, each member's original source files, and the DB record.
+#[server]
+pub async fn delete_model_group(group_id: GroupId) -> Result<(), ServerFnError> {
+    #[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
+    {
+        let pool = db_pool().await.map_err(to_server_err)?;
+        let storage = storage_service();
+        let group = db::get_group(pool, &group_id).await.map_err(to_server_err)?;
+        storage
+            .delete_group_dir(&group.name)
+            .await
+            .map_err(to_server_err)?;
+        for member in &group.members {
+            storage
+                .delete_job_output_dir(&member.job_id, &member.model_name)
+                .await
+                .map_err(to_server_err)?;
+        }
+        db::delete_group(pool, &group_id).await.map_err(to_server_err)
+    }
+    #[cfg(not(all(not(target_arch = "wasm32"), feature = "server")))]
+    unreachable!()
+}
+
+/// Returns all conversion jobs with Completed status, newest first.
+#[server]
+pub async fn list_completed_jobs() -> Result<Vec<ConversionJob>, ServerFnError> {
+    #[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
+    {
+        let pool = db_pool().await.map_err(to_server_err)?;
+        db::list_completed_jobs(pool).await.map_err(to_server_err)
+    }
+    #[cfg(not(all(not(target_arch = "wasm32"), feature = "server")))]
+    unreachable!()
 }

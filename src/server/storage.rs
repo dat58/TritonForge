@@ -28,6 +28,11 @@ impl StorageService {
         &self.upload_dir
     }
 
+    /// Returns the configured model groups root directory.
+    pub fn groups_dir(&self) -> &Path {
+        &self.groups_dir
+    }
+
     /// Creates a new `StorageService` from the application configuration.
     pub fn new(config: &AppConfig) -> Self {
         Self {

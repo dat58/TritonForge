@@ -283,6 +283,23 @@ pub async fn list_jobs(
     rows.into_iter().map(row_to_job).collect()
 }
 
+/// Returns all completed jobs ordered by creation time (newest first), capped at 200.
+#[instrument(skip(pool))]
+pub async fn list_completed_jobs(pool: &DbPool) -> Result<Vec<ConversionJob>, AppError> {
+    let rows = sqlx::query_as::<_, ConversionJobRow>(
+        "SELECT id, model_name, model_version, model_format, image_tag, gpu_id, trt_options, \
+         status, progress_percent, output_path, error_message, created_at, updated_at \
+         FROM conversion_jobs \
+         WHERE status = 'completed' \
+         ORDER BY created_at DESC \
+         LIMIT 200",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter().map(row_to_job).collect()
+}
+
 #[derive(Debug, FromRow)]
 struct ConversionJobLogRow {
     id: i64,
