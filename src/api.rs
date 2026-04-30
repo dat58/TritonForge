@@ -249,7 +249,7 @@ pub async fn submit_job(
     let docker = docker_service().await.map_err(to_server_err)?;
     let storage = storage_service();
 
-    // Resource check: free GPU memory must be > 1.4 * workspace_mb
+    // Resource check: free GPU memory must be > 1.2 * workspace_mb
     #[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
     {
         use crate::server::gpu::GpuService;
@@ -259,10 +259,10 @@ pub async fn submit_job(
 
         match selected_gpu {
             Some(gpu) => {
-                let required_mb = (req.trt_options.workspace_mb as f64 * 1.4) as u64;
+                let required_mb = (req.trt_options.workspace_mb as f64 * 1.2) as u64;
                 if gpu.memory_free_mb < required_mb {
                     return Err(to_server_err(AppError::Validation(format!(
-                        "Insufficient GPU memory: {} MB free, but {} MB required (1.4 * workspace)",
+                        "Insufficient GPU memory: {} MB free, but {} MB required (1.2 * workspace)",
                         gpu.memory_free_mb, required_mb
                     ))));
                 }
