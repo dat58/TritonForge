@@ -519,8 +519,14 @@ mod tests {
 
     #[test]
     fn parse_progress_uses_known_trtexec_milestones() {
-        assert_eq!(parse_progress("[I] Building engine"), Some(20));
-        assert_eq!(parse_progress("[I] Finished engine building"), Some(70));
+        assert_eq!(
+            parse_progress("[I] Finished parsing network model"),
+            Some(15)
+        );
+        assert_eq!(parse_progress("[I] building engine"), Some(30));
+        assert_eq!(parse_progress("[I] Trace details"), Some(50));
+        assert_eq!(parse_progress("[I] Average on"), Some(70));
+        assert_eq!(parse_progress("[I] Performance summary"), Some(90));
         assert_eq!(parse_progress("[I] Starting conversion"), None);
     }
 }
