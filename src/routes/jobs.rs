@@ -3,9 +3,9 @@
 use crate::api::{delete_job, list_all_jobs};
 use crate::app::Route;
 use crate::components::JobCard;
-use crate::models::job::{JobId, JobStatus};
+use crate::models::job::{ConversionJob, JobId, JobStatus};
+use crate::routes::timer;
 use dioxus::prelude::*;
-use futures_timer::Delay;
 use std::time::Duration;
 
 const PAGE_SIZE: u32 = 20;
@@ -14,12 +14,12 @@ const PAGE_SIZE: u32 = 20;
 #[component]
 pub fn JobsPage() -> Element {
     let mut page_offset = use_signal(|| 0u32);
-    let mut tick = use_signal(|| 0u32);
-    let mut polling = use_signal(|| false);
+    let mut poll_tick = use_signal(|| 0u32);
+    let mut should_poll = use_signal(|| false);
 
     let jobs = use_resource(move || {
         let offset = page_offset();
-        let _ = tick();
+        let _ = poll_tick();
         async move { list_all_jobs(PAGE_SIZE, offset).await }
     });
 
@@ -27,22 +27,26 @@ pub fn JobsPage() -> Element {
         let has_active = jobs
             .read()
             .as_ref()
-            .and_then(|r| r.as_ref().ok())
-            .map(|list| {
-                list.iter()
-                    .any(|j| !matches!(j.status, JobStatus::Completed | JobStatus::Failed))
-            })
-            .unwrap_or(false);
+            .and_then(|result| result.as_ref().ok())
+            .is_some_and(|list| jobs_have_active(list));
 
-        if has_active && !*polling.read() {
-            polling.set(true);
-            spawn(async move {
-                Delay::new(Duration::from_secs(5)).await;
-                *tick.write() += 1;
-                polling.set(false);
-            });
+        if *should_poll.peek() != has_active {
+            should_poll.set(has_active);
         }
     });
+
+    use_future(move || async move {
+        loop {
+            timer::sleep(Duration::from_secs(5)).await;
+            let should_refresh = *should_poll.read();
+
+            if should_refresh {
+                *poll_tick.write() += 1;
+            }
+        }
+    });
+
+    let has_active_jobs = *should_poll.read();
 
     rsx! {
         div { class: "min-h-screen",
@@ -60,7 +64,7 @@ pub fn JobsPage() -> Element {
                     }
                     div { class: "flex items-center gap-3",
                         // Refresh indicator when polling
-                        if *polling.read() {
+                        if has_active_jobs {
                             div { class: "flex items-center gap-1.5 text-xs text-cyan-400",
                                 div { class: "w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" }
                                 "Live"
@@ -68,7 +72,7 @@ pub fn JobsPage() -> Element {
                         }
                         button {
                             class: "flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-sm text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-all duration-200 border border-transparent hover:border-slate-700",
-                            onclick: move |_| *tick.write() += 1,
+                            onclick: move |_| *poll_tick.write() += 1,
                             "↻  Refresh"
                         }
                         Link {
@@ -122,7 +126,7 @@ pub fn JobsPage() -> Element {
                                     on_delete: move |id: JobId| {
                                         spawn(async move {
                                             let _ = delete_job(id.to_string()).await;
-                                            *tick.write() += 1;
+                                            *poll_tick.write() += 1;
                                         });
                                     },
                                 }
@@ -158,4 +162,12 @@ pub fn JobsPage() -> Element {
             }
         }
     }
+}
+
+fn jobs_have_active(jobs: &[ConversionJob]) -> bool {
+    jobs.iter().any(|job| is_active_status(&job.status))
+}
+
+fn is_active_status(status: &JobStatus) -> bool {
+    !matches!(status, JobStatus::Completed | JobStatus::Failed)
 }
