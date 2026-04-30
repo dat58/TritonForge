@@ -11,6 +11,11 @@ use std::collections::HashSet;
 use std::path::Path;
 use tokio::fs;
 
+const CONFIG_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/config.pbtxt"
+));
+
 /// Generates `config.pbtxt` from `templates/config.pbtxt` and ONNX graph metadata.
 pub async fn generate_config_pbtxt(
     model_path: &Path,
@@ -18,15 +23,7 @@ pub async fn generate_config_pbtxt(
 ) -> Result<String, AppError> {
     let model_bytes = fs::read(model_path).await?;
     let metadata = parse_onnx_metadata(&model_bytes)?;
-    let template = read_config_template().await?;
-    fill_template(&template, model_name, &metadata)
-}
-
-async fn read_config_template() -> Result<String, AppError> {
-    let dir = std::env::var("TEMPLATES_DIR").unwrap_or_else(|_| "./templates".into());
-    fs::read_to_string(Path::new(&dir).join("config.pbtxt"))
-        .await
-        .map_err(AppError::Io)
+    fill_template(CONFIG_TEMPLATE, model_name, &metadata)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
