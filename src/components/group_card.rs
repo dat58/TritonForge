@@ -1,6 +1,8 @@
 //! Card component for a model group with inline rename and action buttons.
 
 use crate::models::group::{GroupId, ModelGroup};
+#[cfg(target_arch = "wasm32")]
+use dioxus::document::eval;
 use dioxus::prelude::*;
 
 /// Props for [`GroupCard`].
@@ -24,6 +26,7 @@ pub fn GroupCard(props: GroupCardProps) -> Element {
     let mut editing = use_signal(|| false);
     let mut name_buf = use_signal(|| props.group.name.clone());
     let mut confirm_delete = use_signal(|| false);
+    let mut copied_path = use_signal(|| false);
 
     let group_id = props.group.id.clone();
     let group_id_release = props.group.id.clone();
@@ -35,7 +38,13 @@ pub fn GroupCard(props: GroupCardProps) -> Element {
         format!("{member_count} models")
     };
     let dir = props.group.dir_path.to_string_lossy().to_string();
+    let dir_for_copy = dir.clone();
     let created = props.group.created_at.format("%b %d, %Y %H:%M").to_string();
+    let copy_title = if *copied_path.read() {
+        "Copied"
+    } else {
+        "Copy output path"
+    };
 
     let border_class = if props.selected {
         "glass-card p-5 border-cyan-500 cursor-pointer"
@@ -130,7 +139,22 @@ pub fn GroupCard(props: GroupCardProps) -> Element {
                         "{models_label}"
                     }
                 }
-                p { class: "text-slate-500 text-xs font-mono truncate", title: "{dir}", "{dir}" }
+                div { class: "flex items-center gap-1.5 min-w-0",
+                    p { class: "text-slate-500 text-xs font-mono truncate flex-1 min-w-0", title: "{dir}", "{dir}" }
+                    button {
+                        class: "flex-shrink-0 w-6 h-6 rounded-md text-slate-500 hover:text-cyan-300 hover:bg-slate-800/70 transition-colors text-xs",
+                        title: "{copy_title}",
+                        onclick: move |evt| {
+                            evt.stop_propagation();
+                            copied_path.set(true);
+                            let path = dir_for_copy.clone();
+                            spawn(async move {
+                                copy_output_path(&path).await;
+                            });
+                        },
+                        "⧉"
+                    }
+                }
                 p { class: "text-slate-600 text-xs", "{created}" }
             }
 
@@ -156,5 +180,25 @@ pub fn GroupCard(props: GroupCardProps) -> Element {
                 }
             }
         }
+    }
+}
+
+async fn copy_output_path(path: &str) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let Ok(path_json) = serde_json::to_string(path) else {
+            return;
+        };
+        let js = format!(
+            "if (navigator.clipboard) {{
+                navigator.clipboard.writeText({path_json});
+             }}"
+        );
+        let _ = eval(&js).await;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = path;
     }
 }
