@@ -1256,6 +1256,11 @@ body {
   border-color: rgb(14 116 144 / var(--tw-border-opacity, 1));
 }
 
+.border-cyan-900 {
+  --tw-border-opacity: 1;
+  border-color: rgb(22 78 99 / var(--tw-border-opacity, 1));
+}
+
 .border-cyan-900\/70 {
   border-color: rgb(22 78 99 / 0.7);
 }
@@ -1511,6 +1516,10 @@ body {
 .bg-slate-950 {
   --tw-bg-opacity: 1;
   background-color: rgb(2 6 23 / var(--tw-bg-opacity, 1));
+}
+
+.bg-slate-950\/20 {
+  background-color: rgb(2 6 23 / 0.2);
 }
 
 .bg-slate-950\/30 {
@@ -2100,6 +2109,14 @@ body {
 
   .sm\:flex-row {
     flex-direction: row;
+  }
+
+  .sm\:items-end {
+    align-items: flex-end;
+  }
+
+  .sm\:justify-between {
+    justify-content: space-between;
   }
 
   .sm\:px-6 {

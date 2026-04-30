@@ -9,7 +9,7 @@ use crate::components::GroupCard;
 use crate::models::group::{GroupId, ModelGroup, ModelGroupMember};
 use crate::models::job::ConversionJob;
 use dioxus::prelude::*;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 /// Model groups management page.
 #[component]
@@ -182,9 +182,54 @@ fn short_tensorrt_image_tag(image_tag: &str) -> &str {
     tag.strip_suffix("-py3").unwrap_or(tag)
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct CompletedJobGroup {
+    image_tag: String,
+    jobs: Vec<ConversionJob>,
+}
+
+fn group_completed_jobs_by_image_tag(jobs: &[ConversionJob]) -> Vec<CompletedJobGroup> {
+    let mut groups: BTreeMap<String, Vec<ConversionJob>> = BTreeMap::new();
+
+    for job in jobs {
+        groups
+            .entry(job.image_tag.clone())
+            .or_default()
+            .push(job.clone());
+    }
+
+    groups
+        .into_iter()
+        .rev()
+        .map(|(image_tag, jobs)| CompletedJobGroup { image_tag, jobs })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::short_tensorrt_image_tag;
+    use super::{group_completed_jobs_by_image_tag, short_tensorrt_image_tag};
+    use crate::models::config::GpuId;
+    use crate::models::job::{ConversionJob, JobId, JobStatus, ModelFormat, TrtOptions};
+    use chrono::Utc;
+    use std::path::PathBuf;
+
+    fn sample_job(model_name: &str, image_tag: &str) -> ConversionJob {
+        ConversionJob {
+            id: JobId::new(),
+            model_name: model_name.to_owned(),
+            model_version: 1,
+            model_format: ModelFormat::Onnx,
+            image_tag: image_tag.to_owned(),
+            gpu_id: GpuId(0),
+            trt_options: TrtOptions::default(),
+            status: JobStatus::Completed,
+            progress_percent: 100,
+            output_path: Some(PathBuf::from("/tmp/model")),
+            error_message: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
 
     #[test]
     fn short_tensorrt_image_tag_drops_repository_and_py_suffix() {
@@ -203,6 +248,48 @@ mod tests {
         assert_eq!(
             short_tensorrt_image_tag("tensorrt:24.04-custom"),
             "24.04-custom"
+        );
+    }
+
+    #[test]
+    fn group_completed_jobs_by_image_tag_keeps_same_image_together() {
+        let jobs = vec![
+            sample_job("resnet50", "nvcr.io/nvidia/tensorrt:24.04-py3"),
+            sample_job("yolov8", "nvcr.io/nvidia/tensorrt:24.08-py3"),
+            sample_job("bert", "nvcr.io/nvidia/tensorrt:24.04-py3"),
+        ];
+
+        let groups = group_completed_jobs_by_image_tag(&jobs);
+        let trt_2404 = groups
+            .iter()
+            .find(|group| group.image_tag == "nvcr.io/nvidia/tensorrt:24.04-py3")
+            .expect("24.04 group exists");
+
+        assert_eq!(trt_2404.jobs.len(), 2);
+        assert!(trt_2404.jobs.iter().any(|job| job.model_name == "resnet50"));
+        assert!(trt_2404.jobs.iter().any(|job| job.model_name == "bert"));
+    }
+
+    #[test]
+    fn group_completed_jobs_by_image_tag_sorts_groups_by_tag_descending() {
+        let jobs = vec![
+            sample_job("resnet50", "nvcr.io/nvidia/tensorrt:24.04-py3"),
+            sample_job("yolov8", "nvcr.io/nvidia/tensorrt:24.08-py3"),
+            sample_job("bert", "nvcr.io/nvidia/tensorrt:23.12-py3"),
+        ];
+
+        let image_tags: Vec<_> = group_completed_jobs_by_image_tag(&jobs)
+            .into_iter()
+            .map(|group| group.image_tag)
+            .collect();
+
+        assert_eq!(
+            image_tags,
+            vec![
+                "nvcr.io/nvidia/tensorrt:24.08-py3",
+                "nvcr.io/nvidia/tensorrt:24.04-py3",
+                "nvcr.io/nvidia/tensorrt:23.12-py3",
+            ]
         );
     }
 }
@@ -253,7 +340,7 @@ async fn update_group_models(
 fn model_picker(
     group: ModelGroup,
     completed: &Resource<Result<Vec<ConversionJob>, ServerFnError>>,
-    mut checked_models: Signal<HashSet<String>>,
+    checked_models: Signal<HashSet<String>>,
     mut grouping_busy: Signal<bool>,
     mut refresh_tick: Signal<u32>,
 ) -> Element {
@@ -334,81 +421,39 @@ fn model_picker(
                             }
                         }
                     },
-                    Some(Ok(list)) => rsx! {
-                        div { class: "grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3",
-                            for job in list {
-                                {
-                                    let key = model_key(&job.id.to_string(), &job.model_name);
-                                    let key_toggle = key.clone();
-                                    let in_group = current_keys.contains(&key);
-                                    let selected = desired_keys.contains(&key);
-                                    let created = job.created_at.format("%b %d").to_string();
-                                    let image_tag = short_tensorrt_image_tag(&job.image_tag).to_owned();
+                    Some(Ok(list)) => {
+                        let grouped_jobs = group_completed_jobs_by_image_tag(list);
 
-                                    let (card_border, card_bg, indicator_style, model_text) = if in_group && selected {
-                                        (
-                                            "border-emerald-800/50",
-                                            "bg-emerald-950/20",
-                                            "background:#065f46;border-color:#065f46;",
-                                            "text-emerald-300",
-                                        )
-                                    } else if in_group {
-                                        (
-                                            "border-amber-700/70",
-                                            "bg-amber-950/20",
-                                            "border-color:#d97706;",
-                                            "text-amber-200",
-                                        )
-                                    } else if selected {
-                                        (
-                                            "border-cyan-600",
-                                            "bg-cyan-950/20",
-                                            "background:#0891b2;border-color:#0891b2;",
-                                            "text-cyan-200",
-                                        )
-                                    } else {
-                                        (
-                                            "border-slate-700/60",
-                                            "hover:bg-slate-800/40",
-                                            "border-color:#475569;",
-                                            "text-slate-200",
-                                        )
-                                    };
+                        rsx! {
+                            div { class: "flex flex-col gap-5",
+                                for group in grouped_jobs {
+                                    {
+                                        let short_tag = short_tensorrt_image_tag(&group.image_tag).to_owned();
+                                        let full_tag = group.image_tag.clone();
+                                        let count = group.jobs.len();
 
-                                    rsx! {
-                                        div {
-                                            key: "{key}",
-                                            class: "relative rounded-lg border p-4 pr-8 cursor-pointer transition-all duration-150 {card_border} {card_bg}",
-                                            onclick: move |_| {
-                                                let mut models = checked_models.write();
-                                                if models.contains(&key_toggle) {
-                                                    models.remove(&key_toggle);
-                                                } else {
-                                                    models.insert(key_toggle.clone());
+                                        rsx! {
+                                            section { key: "{full_tag}", class: "rounded-xl border border-slate-800/70 bg-slate-950/20 p-4",
+                                                div { class: "flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between mb-3",
+                                                    div {
+                                                        h3 { class: "text-sm font-semibold text-slate-200",
+                                                            "TensorRT {short_tag}"
+                                                        }
+                                                        p { class: "text-xs text-slate-600 break-all",
+                                                            "{full_tag}"
+                                                        }
+                                                    }
+                                                    span { class: "text-xs text-slate-500",
+                                                        "{count} models"
+                                                    }
                                                 }
-                                            },
 
-                                            // Indicator (top-right)
-                                            div {
-                                                class: "w-4 h-4 rounded border flex items-center justify-center flex-shrink-0",
-                                                style: "position:absolute;top:0.625rem;right:0.625rem;z-index:1;{indicator_style}",
-                                                if selected {
-                                                    span { class: "text-white text-[10px] leading-none font-bold", "✓" }
+                                                div { class: "grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3",
+                                                    for job in group.jobs {
+                                                        {model_picker_card(job, &current_keys, &desired_keys, checked_models)}
+                                                    }
                                                 }
                                             }
-
-                                            // Model info
-                                            p {
-                                                class: "text-sm font-medium truncate {model_text}",
-                                                "{job.model_name}"
-                                            }
-                                            p { class: "text-xs text-slate-500 mt-0.5",
-                                                "{job.model_format} · v{job.model_version}"
-                                            }
-                                            p { class: "text-xs text-slate-500 mt-0.5",
-                                                "TensorRT · {image_tag}"
-                                            }
-                                            p { class: "text-xs text-slate-600 mt-1", "{created}" }
                                         }
                                     }
                                 }
@@ -418,5 +463,91 @@ fn model_picker(
                 }}
             }
         }
+    }
+}
+
+fn model_picker_card(
+    job: ConversionJob,
+    current_keys: &HashSet<String>,
+    desired_keys: &HashSet<String>,
+    mut checked_models: Signal<HashSet<String>>,
+) -> Element {
+    let key = model_key(&job.id.to_string(), &job.model_name);
+    let key_toggle = key.clone();
+    let in_group = current_keys.contains(&key);
+    let selected = desired_keys.contains(&key);
+    let created = job.created_at.format("%b %d").to_string();
+    let image_tag = short_tensorrt_image_tag(&job.image_tag).to_owned();
+
+    let (card_border, card_bg, indicator_style, model_text) = model_card_style(in_group, selected);
+
+    rsx! {
+        div {
+            key: "{key}",
+            class: "relative rounded-lg border p-4 pr-8 cursor-pointer transition-all duration-150 {card_border} {card_bg}",
+            onclick: move |_| {
+                let mut models = checked_models.write();
+                if models.contains(&key_toggle) {
+                    models.remove(&key_toggle);
+                } else {
+                    models.insert(key_toggle.clone());
+                }
+            },
+
+            div {
+                class: "w-4 h-4 rounded border flex items-center justify-center flex-shrink-0",
+                style: "position:absolute;top:0.625rem;right:0.625rem;z-index:1;{indicator_style}",
+                if selected {
+                    span { class: "text-white text-[10px] leading-none font-bold", "✓" }
+                }
+            }
+
+            p {
+                class: "text-sm font-medium truncate {model_text}",
+                "{job.model_name}"
+            }
+            p { class: "text-xs text-slate-500 mt-0.5",
+                "{job.model_format} · v{job.model_version}"
+            }
+            p { class: "text-xs text-slate-500 mt-0.5",
+                "TensorRT · {image_tag}"
+            }
+            p { class: "text-xs text-slate-600 mt-1", "{created}" }
+        }
+    }
+}
+
+fn model_card_style(
+    in_group: bool,
+    selected: bool,
+) -> (&'static str, &'static str, &'static str, &'static str) {
+    if in_group && selected {
+        (
+            "border-emerald-800/50",
+            "bg-emerald-950/20",
+            "background:#065f46;border-color:#065f46;",
+            "text-emerald-300",
+        )
+    } else if in_group {
+        (
+            "border-amber-700/70",
+            "bg-amber-950/20",
+            "border-color:#d97706;",
+            "text-amber-200",
+        )
+    } else if selected {
+        (
+            "border-cyan-600",
+            "bg-cyan-950/20",
+            "background:#0891b2;border-color:#0891b2;",
+            "text-cyan-200",
+        )
+    } else {
+        (
+            "border-slate-700/60",
+            "hover:bg-slate-800/40",
+            "border-color:#475569;",
+            "text-slate-200",
+        )
     }
 }
