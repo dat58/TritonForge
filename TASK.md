@@ -63,6 +63,6 @@ Post-launch UX cleanup: warmup is auto-derived from ONNX (no user input), config
 - [x] Commit: `style(group_card): equalize action button heights`
 
 ### 4d — Lift Start dialog and logs panel out of the card; full-width below grid
-- [ ] `src/components/group_card.rs` — remove `show_start_dialog` / `show_logs` / `start_gpu` state; props gain `serving_view`, `on_request_start`, `on_toggle_logs`
-- [ ] `src/routes/groups.rs` — `ServingView` enum + signal; render Start dialog and Logs panel full-width below the grid
-- [ ] Commit: `feat(groups): render serving start dialog and logs full-width below grid`
+- [x] `src/components/group_card.rs` — remove `show_start_dialog` / `show_logs` / `start_gpu` state; props gain `serving_view`, `on_request_start`, `on_toggle_logs`
+- [x] `src/routes/groups.rs` — `ServingView` enum + signal; render Start dialog and Logs panel full-width below the grid
+- [x] Commit: `feat(groups): render serving start dialog and logs full-width below grid`

@@ -1,15 +1,19 @@
 //! Groups management page — create, view, and manage model groups.
 
 use crate::api::{
-    add_models_to_group, create_model_group, list_completed_jobs, list_model_groups,
-    release_model_group, remove_model_from_group, rename_model_group,
+    add_models_to_group, create_model_group, get_group_serving_logs, list_completed_jobs,
+    list_model_groups, release_model_group, remove_model_from_group, rename_model_group,
+    start_group_serving,
 };
 use crate::app::Route;
-use crate::components::GroupCard;
+use crate::components::{GpuSelector, GroupCard, ServingView};
+use crate::models::config::GpuId;
 use crate::models::group::{GroupId, ModelGroup, ModelGroupMember};
 use crate::models::job::ConversionJob;
+use crate::routes::timer;
 use dioxus::prelude::*;
 use std::collections::{BTreeMap, HashSet};
+use std::time::Duration;
 
 /// Model groups management page.
 #[component]
@@ -19,6 +23,11 @@ pub fn GroupsPage() -> Element {
     let mut refresh_tick = use_signal(|| 0u32);
     let grouping_busy = use_signal(|| false);
     let mut create_busy = use_signal(|| false);
+    let mut serving_view: Signal<ServingView> = use_signal(|| ServingView::None);
+    let mut start_gpu: Signal<Option<GpuId>> = use_signal(|| None);
+    let serving_panel_busy = use_signal(|| false);
+    let mut serving_panel_error: Signal<Option<String>> = use_signal(|| None);
+    let mut log_tick = use_signal(|| 0u32);
 
     let groups = use_resource(move || {
         let _ = refresh_tick();
@@ -26,6 +35,27 @@ pub fn GroupsPage() -> Element {
     });
 
     let completed = use_resource(|| async move { list_completed_jobs().await });
+
+    let serving_logs = use_resource(move || {
+        let view = serving_view();
+        let _ = log_tick();
+        async move {
+            match view {
+                ServingView::Logs(gid) => get_group_serving_logs(gid, 1_000).await.map(Some),
+                _ => Ok(None),
+            }
+        }
+    });
+
+    use_future(move || async move {
+        loop {
+            timer::sleep(Duration::from_secs(2)).await;
+
+            if matches!(&*serving_view.read(), ServingView::Logs(_)) {
+                *log_tick.write() += 1;
+            }
+        }
+    });
 
     rsx! {
         div { class: "min-h-screen",
@@ -105,10 +135,12 @@ pub fn GroupsPage() -> Element {
                                     let gid_release_check = group.id.clone();
                                     let member_keys = group_member_keys(group);
                                     let selected = selected_group_id.read().as_ref() == Some(&gid);
+                                    let current_serving_view = serving_view.read().clone();
                                     rsx! {
                                         GroupCard {
                                             group: group.clone(),
                                             selected,
+                                            serving_view: current_serving_view,
                                             on_select: move |id: GroupId| {
                                                 // Toggle: clicking the selected card collapses it.
                                                 if selected_group_id.read().as_ref() == Some(&id) {
@@ -128,6 +160,7 @@ pub fn GroupsPage() -> Element {
                                             on_release: move |_: GroupId| {
                                                 let id = gid_release.clone();
                                                 let check = gid_release_check.clone();
+                                                close_serving_view_for(serving_view, &check);
                                                 spawn(async move {
                                                     let _ = release_model_group(id).await;
                                                     *refresh_tick.write() += 1;
@@ -137,11 +170,50 @@ pub fn GroupsPage() -> Element {
                                                     }
                                                 });
                                             },
+                                            on_request_start: move |id: GroupId| {
+                                                let already_open = matches!(
+                                                    &*serving_view.read(),
+                                                    ServingView::StartDialog(open_id) if open_id == &id
+                                                );
+
+                                                if already_open {
+                                                    serving_view.set(ServingView::None);
+                                                } else {
+                                                    start_gpu.set(None);
+                                                    serving_panel_error.set(None);
+                                                    serving_view.set(ServingView::StartDialog(id));
+                                                }
+                                            },
+                                            on_toggle_logs: move |id: GroupId| {
+                                                let already_open = matches!(
+                                                    &*serving_view.read(),
+                                                    ServingView::Logs(open_id) if open_id == &id
+                                                );
+
+                                                if already_open {
+                                                    serving_view.set(ServingView::None);
+                                                } else {
+                                                    serving_panel_error.set(None);
+                                                    serving_view.set(ServingView::Logs(id));
+                                                    *log_tick.write() += 1;
+                                                }
+                                            },
                                         }
                                     }
                                 }
                             }
                         }
+
+                        {serving_panel(ServingPanelState {
+                            groups: list,
+                            serving_view,
+                            start_gpu,
+                            serving_busy: serving_panel_busy,
+                            serving_error: serving_panel_error,
+                            refresh_tick,
+                            log_tick,
+                            logs: &serving_logs,
+                        })}
 
                         // Model picker — shown only when a group card is selected.
                         {
@@ -159,6 +231,157 @@ pub fn GroupsPage() -> Element {
                         }
                     },
                 }}
+            }
+        }
+    }
+}
+
+fn close_serving_view_for(mut serving_view: Signal<ServingView>, group_id: &GroupId) {
+    let targets_group = matches!(
+        &*serving_view.read(),
+        ServingView::StartDialog(open_id) | ServingView::Logs(open_id) if open_id == group_id
+    );
+
+    if targets_group {
+        serving_view.set(ServingView::None);
+    }
+}
+
+struct ServingPanelState<'a> {
+    groups: &'a [ModelGroup],
+    serving_view: Signal<ServingView>,
+    start_gpu: Signal<Option<GpuId>>,
+    serving_busy: Signal<bool>,
+    serving_error: Signal<Option<String>>,
+    refresh_tick: Signal<u32>,
+    log_tick: Signal<u32>,
+    logs: &'a Resource<Result<Option<String>, ServerFnError>>,
+}
+
+fn serving_panel(state: ServingPanelState<'_>) -> Element {
+    let ServingPanelState {
+        groups,
+        mut serving_view,
+        mut start_gpu,
+        mut serving_busy,
+        mut serving_error,
+        mut refresh_tick,
+        mut log_tick,
+        logs,
+    } = state;
+
+    let view = serving_view.read().clone();
+
+    match view {
+        ServingView::None => rsx! {},
+        ServingView::StartDialog(gid) => {
+            let Some(group) = groups.iter().find(|group| group.id == gid) else {
+                return rsx! {};
+            };
+            let group_name = group.name.clone();
+            let gid_for_start = gid.clone();
+
+            rsx! {
+                div {
+                    class: "mt-6 rounded-xl border border-emerald-900/50 bg-slate-950/70 p-5",
+                    h2 { class: "text-sm font-semibold text-slate-200 mb-1",
+                        "Start tritonserver for \"{group_name}\""
+                    }
+                    p { class: "text-xs text-slate-500 mb-4",
+                        "Pick a GPU for tritonserver. Image: matching tritonserver tag."
+                    }
+                    GpuSelector {
+                        on_select: move |g| start_gpu.set(g),
+                        selected_gpu: *start_gpu.read(),
+                    }
+                    if let Some(ref err) = *serving_error.read() {
+                        div { class: "mt-4 rounded-lg px-3 py-2 text-rose-400 text-sm border border-rose-800/50 bg-rose-950/30",
+                            "{err}"
+                        }
+                    }
+                    div { class: "flex justify-end gap-2 mt-4",
+                        button {
+                            r#type: "button",
+                            class: "px-4 py-2 rounded-lg text-sm text-slate-300 bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors disabled:opacity-50",
+                            disabled: *serving_busy.read(),
+                            onclick: move |_| {
+                                serving_error.set(None);
+                                serving_view.set(ServingView::None);
+                            },
+                            "Cancel"
+                        }
+                        button {
+                            r#type: "button",
+                            class: "px-4 py-2 rounded-lg text-sm font-semibold text-white bg-emerald-700 hover:bg-emerald-600 transition-colors disabled:opacity-50",
+                            disabled: *serving_busy.read() || start_gpu.read().is_none(),
+                            onclick: move |_| {
+                                let Some(gpu) = *start_gpu.read() else { return; };
+                                let gid = gid_for_start.clone();
+                                serving_busy.set(true);
+                                serving_error.set(None);
+                                spawn(async move {
+                                    match start_group_serving(gid.clone(), gpu.0).await {
+                                        Ok(()) => {
+                                            serving_view.set(ServingView::Logs(gid));
+                                            *log_tick.write() += 1;
+                                        }
+                                        Err(e) => serving_error.set(Some(e.to_string())),
+                                    }
+                                    *refresh_tick.write() += 1;
+                                    serving_busy.set(false);
+                                });
+                            },
+                            if *serving_busy.read() {
+                                span { class: "inline-block w-3 h-3 rounded-full border-2 border-white border-t-transparent animate-spin mr-1.5" }
+                            }
+                            "Start"
+                        }
+                    }
+                }
+            }
+        }
+        ServingView::Logs(gid) => {
+            let group_name = groups
+                .iter()
+                .find(|group| group.id == gid)
+                .map(|group| group.name.clone())
+                .unwrap_or_else(|| gid.to_string());
+
+            rsx! {
+                div { class: "mt-6 rounded-xl border border-slate-800 bg-slate-950/70 overflow-hidden",
+                    div { class: "flex items-center justify-between px-5 py-3 border-b border-slate-800 bg-slate-900/50",
+                        h2 { class: "text-sm font-semibold text-slate-200",
+                            "tritonserver logs for \"{group_name}\""
+                        }
+                        button {
+                            r#type: "button",
+                            class: "w-8 h-8 inline-flex items-center justify-center rounded-md text-slate-300 hover:text-cyan-300 hover:bg-slate-800/70 border border-slate-700 transition-colors text-xs",
+                            title: "Close logs",
+                            onclick: move |_| serving_view.set(ServingView::None),
+                            "×"
+                        }
+                    }
+                    {match &*logs.read() {
+                        None => rsx! {
+                            div { class: "px-5 py-4 text-sm text-slate-500", "Loading logs..." }
+                        },
+                        Some(Err(e)) => rsx! {
+                            div { class: "px-5 py-4 text-sm text-rose-400", "Failed to load logs: {e}" }
+                        },
+                        Some(Ok(None)) => rsx! {
+                            div { class: "px-5 py-4 text-sm text-slate-500", "Open logs to load tritonserver output." }
+                        },
+                        Some(Ok(Some(text))) => rsx! {
+                            pre { class: "h-[70vh] min-h-96 overflow-auto p-4 text-xs text-slate-300 whitespace-pre font-mono",
+                                if text.trim().is_empty() {
+                                    "No tritonserver logs yet."
+                                } else {
+                                    "{text}"
+                                }
+                            }
+                        },
+                    }}
+                }
             }
         }
     }

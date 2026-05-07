@@ -1,10 +1,6 @@
 //! Card component for a model group with inline rename and action buttons.
 
-use crate::api::{
-    get_group_serving_logs, get_group_serving_status, start_group_serving, stop_group_serving,
-};
-use crate::components::GpuSelector;
-use crate::models::config::GpuId;
+use crate::api::{get_group_serving_status, stop_group_serving};
 use crate::models::group::{GroupId, ModelGroup};
 use crate::models::serving::{ServingContainer, ServingStatus};
 use crate::routes::timer;
@@ -12,6 +8,29 @@ use crate::routes::timer;
 use dioxus::document::eval;
 use dioxus::prelude::*;
 use std::time::Duration;
+
+/// Which serving panel the parent route currently has open below the grid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServingView {
+    /// No panel is open.
+    None,
+    /// The Start tritonserver dialog is open for this group.
+    StartDialog(GroupId),
+    /// The live logs panel is open for this group.
+    Logs(GroupId),
+}
+
+impl ServingView {
+    /// Returns `true` when the live logs panel targets `group_id`.
+    pub fn is_logs_for(&self, group_id: &GroupId) -> bool {
+        matches!(self, Self::Logs(id) if id == group_id)
+    }
+
+    /// Returns `true` when the Start dialog targets `group_id`.
+    pub fn is_start_for(&self, group_id: &GroupId) -> bool {
+        matches!(self, Self::StartDialog(id) if id == group_id)
+    }
+}
 
 /// Props for [`GroupCard`].
 #[derive(Props, Clone, PartialEq)]
@@ -26,6 +45,14 @@ pub struct GroupCardProps {
     pub on_rename: EventHandler<(GroupId, String)>,
     /// Called when the "Delete" button is confirmed (release group folder and row only).
     pub on_release: EventHandler<GroupId>,
+    /// Called when the ▶ icon is clicked — parent decides whether to open or
+    /// close the start dialog (toggling against `serving_view`).
+    pub on_request_start: EventHandler<GroupId>,
+    /// Called when the logs ▾/▴ toggle is clicked.
+    pub on_toggle_logs: EventHandler<GroupId>,
+    /// Which panel the parent currently has open. The card uses this to flip
+    /// the logs toggle icon and visually hint that the panel below targets it.
+    pub serving_view: ServingView,
 }
 
 /// A card representing a model group with inline rename and delete action.
@@ -35,20 +62,16 @@ pub fn GroupCard(props: GroupCardProps) -> Element {
     let mut name_buf = use_signal(|| props.group.name.clone());
     let mut confirm_delete = use_signal(|| false);
     let mut copied_path = use_signal(|| false);
-    let mut show_start_dialog = use_signal(|| false);
-    let mut start_gpu: Signal<Option<GpuId>> = use_signal(|| None);
     let mut serving_busy = use_signal(|| false);
     let mut serving_error: Signal<Option<String>> = use_signal(|| None);
-    let mut show_logs = use_signal(|| false);
     let mut serving_tick = use_signal(|| 0u32);
-    let mut log_tick = use_signal(|| 0u32);
 
     let group_id = props.group.id.clone();
     let group_id_release = props.group.id.clone();
     let group_id_for_status = props.group.id.clone();
-    let group_id_for_logs = props.group.id.clone();
-    let group_id_for_start = props.group.id.clone();
     let group_id_for_stop = props.group.id.clone();
+    let group_id_for_start = props.group.id.clone();
+    let group_id_for_logs = props.group.id.clone();
 
     let serving = use_resource(move || {
         let gid = group_id_for_status.clone();
@@ -56,26 +79,10 @@ pub fn GroupCard(props: GroupCardProps) -> Element {
         async move { get_group_serving_status(gid).await }
     });
 
-    let logs = use_resource(move || {
-        let gid = group_id_for_logs.clone();
-        let visible = show_logs();
-        let _ = log_tick();
-        async move {
-            if visible {
-                get_group_serving_logs(gid, 1_000).await.map(Some)
-            } else {
-                Ok(None)
-            }
-        }
-    });
-
     use_future(move || async move {
         loop {
             timer::sleep(Duration::from_secs(2)).await;
             *serving_tick.write() += 1;
-            if *show_logs.read() {
-                *log_tick.write() += 1;
-            }
         }
     });
 
@@ -85,6 +92,9 @@ pub fn GroupCard(props: GroupCardProps) -> Element {
         serving_status,
         Some(ServingStatus::Running) | Some(ServingStatus::Starting)
     );
+
+    let logs_open_for_self = props.serving_view.is_logs_for(&props.group.id);
+    let start_open_for_self = props.serving_view.is_start_for(&props.group.id);
 
     let member_count = props.group.members.len();
     let models_label = if member_count == 1 {
@@ -245,21 +255,20 @@ pub fn GroupCard(props: GroupCardProps) -> Element {
                         title: "Start tritonserver",
                         disabled: *serving_busy.read(),
                         onclick: move |_| {
-                            show_start_dialog.toggle();
                             serving_error.set(None);
+                            props.on_request_start.call(group_id_for_start.clone());
                         },
-                        "▶"
+                        if start_open_for_self { "▴" } else { "▶" }
                     }
                 }
                 button {
                     r#type: "button",
                     class: "flex-shrink-0 w-8 h-8 inline-flex items-center justify-center rounded-md text-slate-300 hover:text-cyan-300 hover:bg-slate-800/70 border border-slate-700 transition-colors text-xs",
-                    title: if *show_logs.read() { "Hide logs" } else { "Show logs" },
+                    title: if logs_open_for_self { "Hide logs" } else { "Show logs" },
                     onclick: move |_| {
-                        show_logs.toggle();
-                        *log_tick.write() += 1;
+                        props.on_toggle_logs.call(group_id_for_logs.clone());
                     },
-                    if *show_logs.read() { "▴" } else { "▾" }
+                    if logs_open_for_self { "▴" } else { "▾" }
                 }
 
                 if *confirm_delete.read() {
@@ -280,80 +289,9 @@ pub fn GroupCard(props: GroupCardProps) -> Element {
                 }
             }
 
-            // Start dialog (inline)
-            if *show_start_dialog.read() && !is_running {
-                div {
-                    class: "mt-3 rounded-lg border border-emerald-900/50 bg-slate-950/70 p-3",
-                    onclick: move |evt| evt.stop_propagation(),
-                    p { class: "text-xs text-slate-400 mb-2",
-                        "Pick a GPU for tritonserver. Image: matching tritonserver tag."
-                    }
-                    GpuSelector {
-                        on_select: move |g| start_gpu.set(g),
-                        selected_gpu: *start_gpu.read(),
-                    }
-                    div { class: "flex justify-end gap-2 mt-3",
-                        button {
-                            r#type: "button",
-                            class: "px-3 py-1.5 rounded-md text-xs text-slate-300 bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors",
-                            onclick: move |_| show_start_dialog.set(false),
-                            "Cancel"
-                        }
-                        button {
-                            r#type: "button",
-                            class: "px-3 py-1.5 rounded-md text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-600 transition-colors disabled:opacity-50",
-                            disabled: *serving_busy.read() || start_gpu.read().is_none(),
-                            onclick: move |_| {
-                                let Some(gpu) = *start_gpu.read() else { return; };
-                                let gid = group_id_for_start.clone();
-                                serving_busy.set(true);
-                                serving_error.set(None);
-                                show_start_dialog.set(false);
-                                spawn(async move {
-                                    if let Err(e) = start_group_serving(gid, gpu.0).await {
-                                        serving_error.set(Some(e.to_string()));
-                                    }
-                                    *serving_tick.write() += 1;
-                                    serving_busy.set(false);
-                                });
-                            },
-                            "Start"
-                        }
-                    }
-                }
-            }
-
             if let Some(ref err) = *serving_error.read() {
                 div { class: "mt-3 rounded-lg px-3 py-2 text-rose-400 text-xs border border-rose-800/50 bg-rose-950/30",
                     "{err}"
-                }
-            }
-
-            // Logs panel
-            if *show_logs.read() {
-                div {
-                    class: "mt-3 rounded-lg border border-slate-800 bg-slate-950/60 overflow-hidden",
-                    onclick: move |evt| evt.stop_propagation(),
-                    {match &*logs.read() {
-                        None => rsx! {
-                            div { class: "px-3 py-3 text-xs text-slate-500", "Loading logs..." }
-                        },
-                        Some(Err(e)) => rsx! {
-                            div { class: "px-3 py-3 text-xs text-rose-400", "Failed to load logs: {e}" }
-                        },
-                        Some(Ok(None)) => rsx! {
-                            div { class: "px-3 py-3 text-xs text-slate-500", "Logs panel closed." }
-                        },
-                        Some(Ok(Some(text))) => rsx! {
-                            pre { class: "max-h-64 overflow-auto p-3 text-[11px] text-slate-300 whitespace-pre-wrap font-mono",
-                                if text.trim().is_empty() {
-                                    "No tritonserver logs yet."
-                                } else {
-                                    "{text}"
-                                }
-                            }
-                        },
-                    }}
                 }
             }
         }
