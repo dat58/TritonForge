@@ -5,6 +5,38 @@ use crate::models::group::GroupId;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Host ports published for the Triton HTTP, gRPC, and metrics endpoints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServingPortBindings {
+    /// Host port forwarded to container port 8000/tcp.
+    pub http: u16,
+    /// Host port forwarded to container port 8001/tcp.
+    pub grpc: u16,
+    /// Host port forwarded to container port 8002/tcp.
+    pub metrics: u16,
+}
+
+impl Default for ServingPortBindings {
+    fn default() -> Self {
+        Self {
+            http: 8000,
+            grpc: 8001,
+            metrics: 8002,
+        }
+    }
+}
+
+/// User-selected Docker runtime options for a group serving container.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartServingOptions {
+    /// GPU device index passed to Docker's GPU device request.
+    pub gpu_id: u32,
+    /// Host ports used for Docker `-p host:container` publishing.
+    pub ports: ServingPortBindings,
+    /// Docker network mode/name passed as Docker `--net`.
+    pub network: String,
+}
+
 /// Lifecycle states for a `tritonserver` container managed by TritonForge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ServingStatus {

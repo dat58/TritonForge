@@ -4,7 +4,7 @@
 use crate::errors::AppError;
 use crate::models::config::GpuId;
 use crate::models::group::{GroupId, ModelGroup};
-use crate::models::serving::{ServingContainer, ServingStatus};
+use crate::models::serving::{ServingContainer, ServingPortBindings, ServingStatus};
 use crate::server::db::{self, DbPool, NewJobLog};
 use crate::server::docker::DockerService;
 use bollard::container::LogOutput;
@@ -54,6 +54,8 @@ pub async fn start_tritonserver(
     group: &ModelGroup,
     image_tag: &str,
     gpu_id: GpuId,
+    ports: ServingPortBindings,
+    network: &str,
 ) -> Result<ServingContainer, AppError> {
     if group.members.is_empty() {
         return Err(AppError::Validation(
@@ -73,7 +75,7 @@ pub async fn start_tritonserver(
         )
         .await;
 
-    let port_bindings = build_port_bindings();
+    let port_bindings = build_port_bindings(ports);
     let exposed_ports = build_exposed_ports();
     let mut labels = HashMap::new();
     labels.insert("tritonforge.group_id".to_string(), group.id.to_string());
@@ -81,6 +83,7 @@ pub async fn start_tritonserver(
     let host_config = HostConfig {
         binds: Some(vec![format!("{mount_source}:/models:ro")]),
         port_bindings: Some(port_bindings),
+        network_mode: Some(network.to_owned()),
         device_requests: Some(vec![DeviceRequest {
             driver: Some(String::new()),
             count: None,
@@ -249,14 +252,18 @@ async fn push_log_output(
     }
 }
 
-fn build_port_bindings() -> HashMap<String, Option<Vec<PortBinding>>> {
+fn build_port_bindings(ports: ServingPortBindings) -> HashMap<String, Option<Vec<PortBinding>>> {
     let mut bindings = HashMap::new();
-    for port in [TRITON_HTTP_PORT, TRITON_GRPC_PORT, TRITON_METRICS_PORT] {
+    for (container_port, host_port) in [
+        (TRITON_HTTP_PORT, ports.http),
+        (TRITON_GRPC_PORT, ports.grpc),
+        (TRITON_METRICS_PORT, ports.metrics),
+    ] {
         bindings.insert(
-            format!("{port}/tcp"),
+            format!("{container_port}/tcp"),
             Some(vec![PortBinding {
                 host_ip: Some("0.0.0.0".to_string()),
-                host_port: Some(port.to_string()),
+                host_port: Some(host_port.to_string()),
             }]),
         );
     }
@@ -346,6 +353,37 @@ mod tests {
         assert_eq!(
             container_name_for_group(&id),
             format!("tritonforge-serve-{id}")
+        );
+    }
+
+    #[test]
+    fn build_port_bindings_uses_selected_host_ports() {
+        let bindings = build_port_bindings(ServingPortBindings {
+            http: 9000,
+            grpc: 9001,
+            metrics: 9002,
+        });
+
+        assert_eq!(
+            bindings["8000/tcp"]
+                .as_ref()
+                .and_then(|bindings| bindings.first())
+                .and_then(|binding| binding.host_port.as_deref()),
+            Some("9000")
+        );
+        assert_eq!(
+            bindings["8001/tcp"]
+                .as_ref()
+                .and_then(|bindings| bindings.first())
+                .and_then(|binding| binding.host_port.as_deref()),
+            Some("9001")
+        );
+        assert_eq!(
+            bindings["8002/tcp"]
+                .as_ref()
+                .and_then(|bindings| bindings.first())
+                .and_then(|binding| binding.host_port.as_deref()),
+            Some("9002")
         );
     }
 }

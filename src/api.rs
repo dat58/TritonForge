@@ -11,7 +11,7 @@ use dioxus::prelude::*;
 use crate::models::config::{GpuInfo, TensorRtImage};
 use crate::models::group::{GroupId, ModelGroup, ModelGroupMember};
 use crate::models::job::{ConversionJob, JobId, SubmitJobRequest};
-use crate::models::serving::ServingContainer;
+use crate::models::serving::{ServingContainer, StartServingOptions};
 use crate::onnx::OnnxTensorInfo;
 
 // ---------------------------------------------------------------------------
@@ -132,6 +132,47 @@ fn validate_model_name(name: &str) -> Result<(), AppError> {
     } else {
         Err(AppError::Validation(
             "model name must contain only letters, numbers, '.', '_', or '-'".into(),
+        ))
+    }
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
+fn validate_serving_options(options: &StartServingOptions) -> Result<(), AppError> {
+    let ports = [
+        ("HTTP", options.ports.http),
+        ("gRPC", options.ports.grpc),
+        ("metrics", options.ports.metrics),
+    ];
+
+    for (label, port) in ports {
+        if port == 0 {
+            return Err(AppError::Validation(format!(
+                "{label} host port must be between 1 and 65535"
+            )));
+        }
+    }
+
+    let mut seen = HashSet::new();
+    for (_, port) in ports {
+        if !seen.insert(port) {
+            return Err(AppError::Validation(
+                "host ports must be unique for HTTP, gRPC, and metrics".into(),
+            ));
+        }
+    }
+
+    let network = options.network.trim();
+    let network_valid = !network.is_empty()
+        && network.len() <= 128
+        && network
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':' | '/'));
+
+    if network_valid {
+        Ok(())
+    } else {
+        Err(AppError::Validation(
+            "Docker network must be non-empty and contain only letters, numbers, '.', '_', '-', ':', or '/'".into(),
         ))
     }
 }
@@ -714,8 +755,11 @@ pub async fn list_completed_jobs() -> Result<Vec<ConversionJob>, ServerFnError> 
 /// Starts a `tritonserver` container that mounts the group directory and serves
 /// every model in it.
 #[server]
-#[tracing::instrument(skip_all, fields(group_id = %group_id, gpu_id))]
-pub async fn start_group_serving(group_id: GroupId, gpu_id: u32) -> Result<(), ServerFnError> {
+#[tracing::instrument(skip_all, fields(group_id = %group_id))]
+pub async fn start_group_serving(
+    group_id: GroupId,
+    options: StartServingOptions,
+) -> Result<(), ServerFnError> {
     #[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
     {
         use crate::models::serving::ServingStatus;
@@ -723,6 +767,8 @@ pub async fn start_group_serving(group_id: GroupId, gpu_id: u32) -> Result<(), S
             container_name_for_group, spawn_log_pump, start_tritonserver, triton_image_for_tensorrt,
         };
         use std::sync::Arc;
+
+        validate_serving_options(&options).map_err(to_server_err)?;
 
         let pool = db_pool().await.map_err(to_server_err)?;
         let docker = docker_service().await.map_err(to_server_err)?;
@@ -764,7 +810,7 @@ pub async fn start_group_serving(group_id: GroupId, gpu_id: u32) -> Result<(), S
             container_id: String::new(),
             container_name: container_name_for_group(&group.id),
             image_tag: triton_tag.clone(),
-            gpu_id,
+            gpu_id: options.gpu_id,
             status: ServingStatus::Starting,
             error_message: None,
             started_at: chrono::Utc::now(),
@@ -774,7 +820,16 @@ pub async fn start_group_serving(group_id: GroupId, gpu_id: u32) -> Result<(), S
             .await
             .map_err(to_server_err)?;
 
-        let started = match start_tritonserver(docker, &group, &triton_tag, GpuId(gpu_id)).await {
+        let started = match start_tritonserver(
+            docker,
+            &group,
+            &triton_tag,
+            GpuId(options.gpu_id),
+            options.ports,
+            options.network.trim(),
+        )
+        .await
+        {
             Ok(c) => c,
             Err(e) => {
                 let msg = e.to_string();
@@ -871,7 +926,7 @@ pub async fn get_group_serving_logs(
         else {
             return Ok(String::new());
         };
-        let capped = limit.clamp(1, 1_000);
+        let capped = limit.clamp(1, 10_000);
         let lines = db::tail_serving_logs(pool, &serving.container_id, capped)
             .await
             .map_err(to_server_err)?;

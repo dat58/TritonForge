@@ -10,6 +10,7 @@ use crate::components::{GpuSelector, GroupCard, ServingView};
 use crate::models::config::GpuId;
 use crate::models::group::{GroupId, ModelGroup, ModelGroupMember};
 use crate::models::job::ConversionJob;
+use crate::models::serving::{ServingPortBindings, StartServingOptions};
 use crate::routes::timer;
 use dioxus::prelude::*;
 use std::collections::{BTreeMap, HashSet};
@@ -25,6 +26,10 @@ pub fn GroupsPage() -> Element {
     let mut create_busy = use_signal(|| false);
     let mut serving_view: Signal<ServingView> = use_signal(|| ServingView::None);
     let mut start_gpu: Signal<Option<GpuId>> = use_signal(|| None);
+    let mut http_port = use_signal(|| "8000".to_string());
+    let mut grpc_port = use_signal(|| "8001".to_string());
+    let mut metrics_port = use_signal(|| "8002".to_string());
+    let mut docker_network = use_signal(|| "bridge".to_string());
     let serving_panel_busy = use_signal(|| false);
     let mut serving_panel_error: Signal<Option<String>> = use_signal(|| None);
     let mut log_tick = use_signal(|| 0u32);
@@ -41,7 +46,7 @@ pub fn GroupsPage() -> Element {
         let _ = log_tick();
         async move {
             match view {
-                ServingView::Logs(gid) => get_group_serving_logs(gid, 1_000).await.map(Some),
+                ServingView::Logs(gid) => get_group_serving_logs(gid, 10_000).await.map(Some),
                 _ => Ok(None),
             }
         }
@@ -180,6 +185,10 @@ pub fn GroupsPage() -> Element {
                                                     serving_view.set(ServingView::None);
                                                 } else {
                                                     start_gpu.set(None);
+                                                    http_port.set("8000".to_string());
+                                                    grpc_port.set("8001".to_string());
+                                                    metrics_port.set("8002".to_string());
+                                                    docker_network.set("bridge".to_string());
                                                     serving_panel_error.set(None);
                                                     serving_view.set(ServingView::StartDialog(id));
                                                 }
@@ -208,6 +217,10 @@ pub fn GroupsPage() -> Element {
                             groups: list,
                             serving_view,
                             start_gpu,
+                            http_port,
+                            grpc_port,
+                            metrics_port,
+                            docker_network,
                             serving_busy: serving_panel_busy,
                             serving_error: serving_panel_error,
                             refresh_tick,
@@ -251,6 +264,10 @@ struct ServingPanelState<'a> {
     groups: &'a [ModelGroup],
     serving_view: Signal<ServingView>,
     start_gpu: Signal<Option<GpuId>>,
+    http_port: Signal<String>,
+    grpc_port: Signal<String>,
+    metrics_port: Signal<String>,
+    docker_network: Signal<String>,
     serving_busy: Signal<bool>,
     serving_error: Signal<Option<String>>,
     refresh_tick: Signal<u32>,
@@ -263,6 +280,10 @@ fn serving_panel(state: ServingPanelState<'_>) -> Element {
         groups,
         mut serving_view,
         mut start_gpu,
+        mut http_port,
+        mut grpc_port,
+        mut metrics_port,
+        mut docker_network,
         mut serving_busy,
         mut serving_error,
         mut refresh_tick,
@@ -294,6 +315,64 @@ fn serving_panel(state: ServingPanelState<'_>) -> Element {
                         on_select: move |g| start_gpu.set(g),
                         selected_gpu: *start_gpu.read(),
                     }
+                    div { class: "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mt-4",
+                        div { class: "flex flex-col gap-1.5",
+                            label { class: "text-xs font-semibold uppercase tracking-wider text-slate-400",
+                                "HTTP -p"
+                            }
+                            input {
+                                r#type: "number",
+                                class: "field",
+                                min: "1",
+                                max: "65535",
+                                value: "{http_port.read()}",
+                                oninput: move |evt| http_port.set(evt.value()),
+                            }
+                        }
+                        div { class: "flex flex-col gap-1.5",
+                            label { class: "text-xs font-semibold uppercase tracking-wider text-slate-400",
+                                "gRPC -p"
+                            }
+                            input {
+                                r#type: "number",
+                                class: "field",
+                                min: "1",
+                                max: "65535",
+                                value: "{grpc_port.read()}",
+                                oninput: move |evt| grpc_port.set(evt.value()),
+                            }
+                        }
+                        div { class: "flex flex-col gap-1.5",
+                            label { class: "text-xs font-semibold uppercase tracking-wider text-slate-400",
+                                "Metrics -p"
+                            }
+                            input {
+                                r#type: "number",
+                                class: "field",
+                                min: "1",
+                                max: "65535",
+                                value: "{metrics_port.read()}",
+                                oninput: move |evt| metrics_port.set(evt.value()),
+                            }
+                        }
+                        div { class: "flex flex-col gap-1.5",
+                            label { class: "text-xs font-semibold uppercase tracking-wider text-slate-400",
+                                "Docker --net"
+                            }
+                            input {
+                                r#type: "text",
+                                class: "field",
+                                list: "docker-network-options",
+                                value: "{docker_network.read()}",
+                                oninput: move |evt| docker_network.set(evt.value()),
+                            }
+                            datalist { id: "docker-network-options",
+                                option { value: "bridge" }
+                                option { value: "host" }
+                                option { value: "none" }
+                            }
+                        }
+                    }
                     if let Some(ref err) = *serving_error.read() {
                         div { class: "mt-4 rounded-lg px-3 py-2 text-rose-400 text-sm border border-rose-800/50 bg-rose-950/30",
                             "{err}"
@@ -316,11 +395,24 @@ fn serving_panel(state: ServingPanelState<'_>) -> Element {
                             disabled: *serving_busy.read() || start_gpu.read().is_none(),
                             onclick: move |_| {
                                 let Some(gpu) = *start_gpu.read() else { return; };
+                                let options = match build_start_serving_options(
+                                    gpu,
+                                    &http_port.read(),
+                                    &grpc_port.read(),
+                                    &metrics_port.read(),
+                                    &docker_network.read(),
+                                ) {
+                                    Ok(options) => options,
+                                    Err(err) => {
+                                        serving_error.set(Some(err));
+                                        return;
+                                    }
+                                };
                                 let gid = gid_for_start.clone();
                                 serving_busy.set(true);
                                 serving_error.set(None);
                                 spawn(async move {
-                                    match start_group_serving(gid.clone(), gpu.0).await {
+                                    match start_group_serving(gid.clone(), options).await {
                                         Ok(()) => {
                                             serving_view.set(ServingView::Logs(gid));
                                             *log_tick.write() += 1;
@@ -372,7 +464,9 @@ fn serving_panel(state: ServingPanelState<'_>) -> Element {
                             div { class: "px-5 py-4 text-sm text-slate-500", "Open logs to load tritonserver output." }
                         },
                         Some(Ok(Some(text))) => rsx! {
-                            pre { class: "block h-[76vh] min-h-[36rem] max-h-[76vh] max-w-full overflow-x-auto overflow-y-scroll overscroll-contain p-4 text-xs text-slate-300 whitespace-pre font-mono",
+                            pre {
+                                id: "triton-serving-logs",
+                                class: "block h-[calc(100vh-12rem)] min-h-80 max-h-[calc(100vh-12rem)] max-w-full overflow-x-auto overflow-y-scroll overscroll-contain p-4 text-xs text-slate-300 whitespace-pre font-mono",
                                 if text.trim().is_empty() {
                                     "No tritonserver logs yet."
                                 } else {
@@ -384,6 +478,57 @@ fn serving_panel(state: ServingPanelState<'_>) -> Element {
                 }
             }
         }
+    }
+}
+
+fn build_start_serving_options(
+    gpu: GpuId,
+    http_port: &str,
+    grpc_port: &str,
+    metrics_port: &str,
+    docker_network: &str,
+) -> Result<StartServingOptions, String> {
+    let ports = ServingPortBindings {
+        http: parse_host_port("HTTP", http_port)?,
+        grpc: parse_host_port("gRPC", grpc_port)?,
+        metrics: parse_host_port("metrics", metrics_port)?,
+    };
+
+    if ports.http == ports.grpc || ports.http == ports.metrics || ports.grpc == ports.metrics {
+        return Err("Host ports must be unique for HTTP, gRPC, and metrics.".to_string());
+    }
+
+    let network = docker_network.trim();
+    let network_valid = !network.is_empty()
+        && network.len() <= 128
+        && network
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':' | '/'));
+
+    if !network_valid {
+        return Err(
+            "Docker network must be non-empty and contain only letters, numbers, '.', '_', '-', ':', or '/'."
+                .to_string(),
+        );
+    }
+
+    Ok(StartServingOptions {
+        gpu_id: gpu.0,
+        ports,
+        network: network.to_string(),
+    })
+}
+
+fn parse_host_port(label: &str, value: &str) -> Result<u16, String> {
+    let port = value
+        .trim()
+        .parse::<u16>()
+        .map_err(|_| format!("{label} host port must be between 1 and 65535."))?;
+
+    if port == 0 {
+        Err(format!("{label} host port must be between 1 and 65535."))
+    } else {
+        Ok(port)
     }
 }
 
@@ -430,7 +575,9 @@ fn group_completed_jobs_by_image_tag(jobs: &[ConversionJob]) -> Vec<CompletedJob
 
 #[cfg(test)]
 mod tests {
-    use super::{group_completed_jobs_by_image_tag, short_tensorrt_image_tag};
+    use super::{
+        build_start_serving_options, group_completed_jobs_by_image_tag, short_tensorrt_image_tag,
+    };
     use crate::models::config::GpuId;
     use crate::models::job::{ConversionJob, JobId, JobStatus, ModelFormat, TrtOptions};
     use chrono::Utc;
@@ -514,6 +661,34 @@ mod tests {
                 "nvcr.io/nvidia/tensorrt:23.12-py3",
             ]
         );
+    }
+
+    #[test]
+    fn build_start_serving_options_accepts_ports_and_network() {
+        let options = build_start_serving_options(GpuId(1), "9000", "9001", "9002", "custom_net")
+            .expect("valid serving options");
+
+        assert_eq!(options.gpu_id, 1);
+        assert_eq!(options.ports.http, 9000);
+        assert_eq!(options.ports.grpc, 9001);
+        assert_eq!(options.ports.metrics, 9002);
+        assert_eq!(options.network, "custom_net");
+    }
+
+    #[test]
+    fn build_start_serving_options_rejects_duplicate_ports() {
+        let err = build_start_serving_options(GpuId(0), "8000", "8000", "8002", "bridge")
+            .expect_err("duplicate ports rejected");
+
+        assert!(err.contains("unique"));
+    }
+
+    #[test]
+    fn build_start_serving_options_rejects_blank_network() {
+        let err = build_start_serving_options(GpuId(0), "8000", "8001", "8002", " ")
+            .expect_err("blank network rejected");
+
+        assert!(err.contains("Docker network"));
     }
 }
 
