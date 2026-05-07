@@ -6,6 +6,7 @@ use crate::models::group::{GroupId, ModelGroup, ModelGroupMember};
 use crate::models::job::{
     ConversionJob, ConversionJobLog, JobId, JobStatus, ModelFormat, TrtOptions,
 };
+use crate::models::serving::{ServingContainer, ServingStatus};
 use chrono::DateTime;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode};
 use sqlx::{FromRow, SqlitePool};
@@ -608,6 +609,187 @@ pub async fn delete_group(pool: &DbPool, group_id: &GroupId) -> Result<(), AppEr
 
     tracing::info!("model group deleted");
     Ok(())
+}
+
+// ── Tritonserver serving CRUD ────────────────────────────────────────────────
+
+#[derive(Debug, FromRow)]
+struct ServingContainerRow {
+    group_id: String,
+    container_id: String,
+    container_name: String,
+    image_tag: String,
+    gpu_id: i64,
+    status: String,
+    error_message: Option<String>,
+    started_at: String,
+    stopped_at: Option<String>,
+}
+
+fn row_to_serving(row: ServingContainerRow) -> Result<ServingContainer, AppError> {
+    let group_id: GroupId = row
+        .group_id
+        .parse()
+        .map_err(|e| AppError::Validation(format!("invalid serving group_id: {e}")))?;
+    let gpu_id = u32::try_from(row.gpu_id)
+        .map_err(|_| AppError::Validation("serving gpu_id out of u32 range".into()))?;
+    let started_at = DateTime::parse_from_rfc3339(&row.started_at)
+        .map_err(|e| AppError::Validation(format!("invalid serving started_at: {e}")))?
+        .to_utc();
+    let stopped_at = row
+        .stopped_at
+        .map(|raw| {
+            DateTime::parse_from_rfc3339(&raw)
+                .map(|dt| dt.to_utc())
+                .map_err(|e| AppError::Validation(format!("invalid serving stopped_at: {e}")))
+        })
+        .transpose()?;
+
+    Ok(ServingContainer {
+        group_id,
+        container_id: row.container_id,
+        container_name: row.container_name,
+        image_tag: row.image_tag,
+        gpu_id,
+        status: row.status.parse()?,
+        error_message: row.error_message,
+        started_at,
+        stopped_at,
+    })
+}
+
+/// Inserts or replaces the serving container row for a group.
+#[instrument(skip(pool, container), fields(group_id = %container.group_id))]
+pub async fn upsert_serving_container(
+    pool: &DbPool,
+    container: &ServingContainer,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "INSERT INTO tritonserver_containers \
+         (group_id, container_id, container_name, image_tag, gpu_id, status, \
+          error_message, started_at, stopped_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(group_id) DO UPDATE SET \
+            container_id = excluded.container_id, \
+            container_name = excluded.container_name, \
+            image_tag = excluded.image_tag, \
+            gpu_id = excluded.gpu_id, \
+            status = excluded.status, \
+            error_message = excluded.error_message, \
+            started_at = excluded.started_at, \
+            stopped_at = excluded.stopped_at",
+    )
+    .bind(container.group_id.to_string())
+    .bind(&container.container_id)
+    .bind(&container.container_name)
+    .bind(&container.image_tag)
+    .bind(i64::from(container.gpu_id))
+    .bind(container.status.to_string())
+    .bind(&container.error_message)
+    .bind(container.started_at.to_rfc3339())
+    .bind(container.stopped_at.map(|dt| dt.to_rfc3339()))
+    .execute(pool)
+    .await?;
+
+    tracing::info!(status = %container.status, "serving container row upserted");
+    Ok(())
+}
+
+/// Updates only the status (and optional error/stopped timestamp) of a serving row.
+#[instrument(skip(pool), fields(group_id = %group_id, %status))]
+pub async fn update_serving_status(
+    pool: &DbPool,
+    group_id: &GroupId,
+    status: ServingStatus,
+    error_message: Option<&str>,
+) -> Result<(), AppError> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let stopped_at =
+        matches!(status, ServingStatus::Stopped | ServingStatus::Error).then_some(now.clone());
+
+    sqlx::query(
+        "UPDATE tritonserver_containers \
+         SET status = ?, error_message = ?, stopped_at = COALESCE(?, stopped_at) \
+         WHERE group_id = ?",
+    )
+    .bind(status.to_string())
+    .bind(error_message)
+    .bind(stopped_at)
+    .bind(group_id.to_string())
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Returns the serving container row for a group, if one exists.
+#[instrument(skip(pool), fields(group_id = %group_id))]
+pub async fn get_serving_by_group(
+    pool: &DbPool,
+    group_id: &GroupId,
+) -> Result<Option<ServingContainer>, AppError> {
+    let row = sqlx::query_as::<_, ServingContainerRow>(
+        "SELECT group_id, container_id, container_name, image_tag, gpu_id, status, \
+                error_message, started_at, stopped_at \
+         FROM tritonserver_containers WHERE group_id = ?",
+    )
+    .bind(group_id.to_string())
+    .fetch_optional(pool)
+    .await?;
+
+    row.map(row_to_serving).transpose()
+}
+
+/// Appends a batch of `tritonserver` log lines for a container.
+#[instrument(skip(pool, logs), fields(container_id, count = logs.len()))]
+pub async fn append_serving_logs_batch(
+    pool: &DbPool,
+    container_id: &str,
+    logs: &[NewJobLog],
+) -> Result<(), AppError> {
+    if logs.is_empty() {
+        return Ok(());
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut tx = pool.begin().await?;
+
+    for log in logs {
+        sqlx::query(
+            "INSERT INTO tritonserver_logs (container_id, stream, message, created_at) \
+             VALUES (?, ?, ?, ?)",
+        )
+        .bind(container_id)
+        .bind(&log.stream)
+        .bind(&log.message)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Returns the most recent persisted log lines for a serving container.
+#[instrument(skip(pool), fields(container_id, limit))]
+pub async fn tail_serving_logs(
+    pool: &DbPool,
+    container_id: &str,
+    limit: u32,
+) -> Result<Vec<String>, AppError> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT message FROM tritonserver_logs \
+         WHERE container_id = ? \
+         ORDER BY id DESC \
+         LIMIT ?",
+    )
+    .bind(container_id)
+    .bind(i64::from(limit))
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows.into_iter().rev().map(|(line,)| line).collect())
 }
 
 #[cfg(test)]

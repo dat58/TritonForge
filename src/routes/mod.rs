@@ -5,7 +5,7 @@ pub mod groups;
 pub mod home;
 pub mod job_detail;
 pub mod jobs;
-mod timer;
+pub mod timer;
 
 pub use about::AboutPage;
 pub use groups::GroupsPage;

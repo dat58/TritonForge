@@ -11,22 +11,23 @@ use std::collections::HashSet;
 use std::path::Path;
 use tokio::fs;
 
+const CONFIG_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/config.pbtxt"
+));
+
 /// Generates `config.pbtxt` from `templates/config.pbtxt` and ONNX graph metadata.
+///
+/// One `model_warmup` entry is auto-derived per non-initializer ONNX input
+/// (key = tensor name, data_type matches the tensor's Triton type, dims are the
+/// full tensor shape with any leading `-1` replaced by `1`, `zero_data: true`).
 pub async fn generate_config_pbtxt(
     model_path: &Path,
     model_name: &str,
 ) -> Result<String, AppError> {
     let model_bytes = fs::read(model_path).await?;
     let metadata = parse_onnx_metadata(&model_bytes)?;
-    let template = read_config_template().await?;
-    fill_template(&template, model_name, &metadata)
-}
-
-async fn read_config_template() -> Result<String, AppError> {
-    let dir = std::env::var("TEMPLATES_DIR").unwrap_or_else(|_| "./templates".into());
-    fs::read_to_string(Path::new(&dir).join("config.pbtxt"))
-        .await
-        .map_err(AppError::Io)
+    fill_template(CONFIG_TEMPLATE, model_name, &metadata)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,10 +128,12 @@ fn fill_template(
     metadata: &OnnxMetadata,
 ) -> Result<String, AppError> {
     let mut rendered = template.to_owned();
+    let warmups: Vec<AutoWarmup<'_>> = metadata.inputs.iter().map(AutoWarmup::from).collect();
     let replacements = [
         ("$MODEL_NAME", model_name.to_owned()),
         ("$INPUT_BLOCKS", format_tensor_blocks(&metadata.inputs)),
         ("$OUTPUT_BLOCKS", format_tensor_blocks(&metadata.outputs)),
+        ("$INPUT_WARMUP_BLOCKS", format_warmup_blocks(&warmups)),
     ];
 
     for (placeholder, value) in replacements {
@@ -160,6 +163,51 @@ fn format_tensor_block(tensor: &TensorMetadata) -> String {
         tensor.name,
         tensor.triton_type,
         format_dims(&tensor.dims)
+    )
+}
+
+/// Auto-derived `model_warmup` entry: borrows the tensor name and Triton type
+/// from `TensorMetadata` and replaces any leading dynamic dim with 1.
+struct AutoWarmup<'a> {
+    key: &'a str,
+    data_type: &'a str,
+    dims: Vec<i64>,
+}
+
+impl<'a> From<&'a TensorMetadata> for AutoWarmup<'a> {
+    fn from(tensor: &'a TensorMetadata) -> Self {
+        Self {
+            key: &tensor.name,
+            data_type: &tensor.triton_type,
+            dims: auto_warmup_dims(&tensor.dims),
+        }
+    }
+}
+
+fn auto_warmup_dims(dims: &[i64]) -> Vec<i64> {
+    dims.iter().map(|&d| if d < 0 { 1 } else { d }).collect()
+}
+
+/// Formats the `model_warmup.inputs` map literal as `[ { key: ..., value { ... } }, ... ]`.
+fn format_warmup_blocks(inputs: &[AutoWarmup<'_>]) -> String {
+    if inputs.is_empty() {
+        return "[]".to_owned();
+    }
+    let entries = inputs
+        .iter()
+        .map(format_warmup_entry)
+        .collect::<Vec<_>>()
+        .join(",\n");
+    format!("[\n{entries}\n  ]")
+}
+
+fn format_warmup_entry(input: &AutoWarmup<'_>) -> String {
+    let dim_values: Vec<String> = input.dims.iter().map(ToString::to_string).collect();
+    format!(
+        "    {{\n      key: \"{key}\"\n      value: {{\n        data_type: {dt}\n        dims: [ {dims} ]\n        zero_data: true\n      }}\n    }}",
+        key = input.key,
+        dt = input.data_type,
+        dims = dim_values.join(", ")
     )
 }
 
@@ -281,6 +329,42 @@ mod tests {
         assert!(rendered.contains("name: \"scores\""));
         assert!(rendered.contains("dims: [ 100 ]"));
         assert!(rendered.contains("dims: [ 100, 4 ]\n  },\n  {\n    name: \"scores\""));
+    }
+
+    #[test]
+    fn auto_generates_warmup_from_inputs() {
+        let metadata = OnnxMetadata {
+            inputs: vec![
+                tensor("images", "TYPE_FP32", vec![-1, 3, 224, 224]),
+                tensor("ids", "TYPE_INT64", vec![-1, 16]),
+            ],
+            outputs: vec![tensor("scores", "TYPE_FP32", vec![-1, 1000])],
+        };
+        let template = "model_warmup {\n    name: \"$MODEL_NAME\"\n    inputs: $INPUT_WARMUP_BLOCKS\n}\ninput [\n$INPUT_BLOCKS\n]\noutput [\n$OUTPUT_BLOCKS\n]";
+
+        let rendered = fill_template(template, "resnet", &metadata).expect("render template");
+
+        assert!(rendered.contains("model_warmup"));
+        assert!(!rendered.contains("$INPUT_WARMUP_BLOCKS"));
+        // Both ONNX inputs become warmup entries.
+        assert!(rendered.contains("key: \"images\""));
+        assert!(rendered.contains("key: \"ids\""));
+        // Triton type carries through.
+        assert!(rendered.contains("data_type: TYPE_FP32"));
+        assert!(rendered.contains("data_type: TYPE_INT64"));
+        // Leading -1 (dynamic batch) is rewritten to 1; static dims preserved.
+        assert!(rendered.contains("dims: [ 1, 3, 224, 224 ]"));
+        assert!(rendered.contains("dims: [ 1, 16 ]"));
+        // zero_data is the default and only data source.
+        assert!(rendered.contains("zero_data: true"));
+        assert!(!rendered.contains("random_data"));
+    }
+
+    #[test]
+    fn auto_warmup_dims_replaces_negative_with_one() {
+        assert_eq!(auto_warmup_dims(&[-1, 3, 224, 224]), vec![1, 3, 224, 224]);
+        assert_eq!(auto_warmup_dims(&[1, 16]), vec![1, 16]);
+        assert_eq!(auto_warmup_dims(&[-1, -1, 16]), vec![1, 1, 16]);
     }
 
     #[test]
