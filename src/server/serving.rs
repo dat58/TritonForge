@@ -55,7 +55,7 @@ pub async fn start_tritonserver(
     image_tag: &str,
     gpu_id: GpuId,
     ports: ServingPortBindings,
-    network: &str,
+    network: Option<&str>,
 ) -> Result<ServingContainer, AppError> {
     if group.members.is_empty() {
         return Err(AppError::Validation(
@@ -82,8 +82,8 @@ pub async fn start_tritonserver(
 
     let host_config = HostConfig {
         binds: Some(vec![format!("{mount_source}:/models:ro")]),
-        port_bindings: Some(port_bindings),
-        network_mode: Some(network.to_owned()),
+        port_bindings,
+        network_mode: network.map(str::to_owned),
         device_requests: Some(vec![DeviceRequest {
             driver: Some(String::new()),
             count: None,
@@ -250,24 +250,35 @@ async fn push_log_output(
             batch.flush(pool, container_id).await;
         }
     }
+
+    batch.flush(pool, container_id).await;
 }
 
-fn build_port_bindings(ports: ServingPortBindings) -> HashMap<String, Option<Vec<PortBinding>>> {
+fn build_port_bindings(
+    ports: ServingPortBindings,
+) -> Option<HashMap<String, Option<Vec<PortBinding>>>> {
     let mut bindings = HashMap::new();
     for (container_port, host_port) in [
         (TRITON_HTTP_PORT, ports.http),
         (TRITON_GRPC_PORT, ports.grpc),
         (TRITON_METRICS_PORT, ports.metrics),
     ] {
-        bindings.insert(
-            format!("{container_port}/tcp"),
-            Some(vec![PortBinding {
-                host_ip: Some("0.0.0.0".to_string()),
-                host_port: Some(host_port.to_string()),
-            }]),
-        );
+        if let Some(host_port) = host_port {
+            bindings.insert(
+                format!("{container_port}/tcp"),
+                Some(vec![PortBinding {
+                    host_ip: Some("0.0.0.0".to_string()),
+                    host_port: Some(host_port.to_string()),
+                }]),
+            );
+        }
     }
-    bindings
+
+    if bindings.is_empty() {
+        None
+    } else {
+        Some(bindings)
+    }
 }
 
 fn build_exposed_ports() -> Vec<String> {
@@ -359,10 +370,11 @@ mod tests {
     #[test]
     fn build_port_bindings_uses_selected_host_ports() {
         let bindings = build_port_bindings(ServingPortBindings {
-            http: 9000,
-            grpc: 9001,
-            metrics: 9002,
-        });
+            http: Some(9000),
+            grpc: Some(9001),
+            metrics: Some(9002),
+        })
+        .expect("port bindings");
 
         assert_eq!(
             bindings["8000/tcp"]
@@ -385,5 +397,24 @@ mod tests {
                 .and_then(|binding| binding.host_port.as_deref()),
             Some("9002")
         );
+    }
+
+    #[test]
+    fn build_port_bindings_omits_blank_ports() {
+        let bindings = build_port_bindings(ServingPortBindings {
+            http: Some(9000),
+            grpc: None,
+            metrics: None,
+        })
+        .expect("port bindings");
+
+        assert!(bindings.contains_key("8000/tcp"));
+        assert!(!bindings.contains_key("8001/tcp"));
+        assert!(!bindings.contains_key("8002/tcp"));
+    }
+
+    #[test]
+    fn build_port_bindings_returns_none_when_all_ports_blank() {
+        assert!(build_port_bindings(ServingPortBindings::default()).is_none());
     }
 }

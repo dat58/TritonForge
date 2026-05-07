@@ -26,10 +26,10 @@ pub fn GroupsPage() -> Element {
     let mut create_busy = use_signal(|| false);
     let mut serving_view: Signal<ServingView> = use_signal(|| ServingView::None);
     let mut start_gpu: Signal<Option<GpuId>> = use_signal(|| None);
-    let mut http_port = use_signal(|| "8000".to_string());
-    let mut grpc_port = use_signal(|| "8001".to_string());
-    let mut metrics_port = use_signal(|| "8002".to_string());
-    let mut docker_network = use_signal(|| "bridge".to_string());
+    let mut http_port = use_signal(String::new);
+    let mut grpc_port = use_signal(String::new);
+    let mut metrics_port = use_signal(String::new);
+    let mut docker_network = use_signal(String::new);
     let serving_panel_busy = use_signal(|| false);
     let mut serving_panel_error: Signal<Option<String>> = use_signal(|| None);
     let mut log_tick = use_signal(|| 0u32);
@@ -185,10 +185,10 @@ pub fn GroupsPage() -> Element {
                                                     serving_view.set(ServingView::None);
                                                 } else {
                                                     start_gpu.set(None);
-                                                    http_port.set("8000".to_string());
-                                                    grpc_port.set("8001".to_string());
-                                                    metrics_port.set("8002".to_string());
-                                                    docker_network.set("bridge".to_string());
+                                                    http_port.set(String::new());
+                                                    grpc_port.set(String::new());
+                                                    metrics_port.set(String::new());
+                                                    docker_network.set(String::new());
                                                     serving_panel_error.set(None);
                                                     serving_view.set(ServingView::StartDialog(id));
                                                 }
@@ -325,6 +325,7 @@ fn serving_panel(state: ServingPanelState<'_>) -> Element {
                                 class: "field",
                                 min: "1",
                                 max: "65535",
+                                placeholder: "optional, e.g. 8000",
                                 value: "{http_port.read()}",
                                 oninput: move |evt| http_port.set(evt.value()),
                             }
@@ -338,6 +339,7 @@ fn serving_panel(state: ServingPanelState<'_>) -> Element {
                                 class: "field",
                                 min: "1",
                                 max: "65535",
+                                placeholder: "optional, e.g. 8001",
                                 value: "{grpc_port.read()}",
                                 oninput: move |evt| grpc_port.set(evt.value()),
                             }
@@ -351,6 +353,7 @@ fn serving_panel(state: ServingPanelState<'_>) -> Element {
                                 class: "field",
                                 min: "1",
                                 max: "65535",
+                                placeholder: "optional, e.g. 8002",
                                 value: "{metrics_port.read()}",
                                 oninput: move |evt| metrics_port.set(evt.value()),
                             }
@@ -363,6 +366,7 @@ fn serving_panel(state: ServingPanelState<'_>) -> Element {
                                 r#type: "text",
                                 class: "field",
                                 list: "docker-network-options",
+                                placeholder: "optional, e.g. bridge",
                                 value: "{docker_network.read()}",
                                 oninput: move |evt| docker_network.set(evt.value()),
                             }
@@ -489,37 +493,52 @@ fn build_start_serving_options(
     docker_network: &str,
 ) -> Result<StartServingOptions, String> {
     let ports = ServingPortBindings {
-        http: parse_host_port("HTTP", http_port)?,
-        grpc: parse_host_port("gRPC", grpc_port)?,
-        metrics: parse_host_port("metrics", metrics_port)?,
+        http: parse_optional_host_port("HTTP", http_port)?,
+        grpc: parse_optional_host_port("gRPC", grpc_port)?,
+        metrics: parse_optional_host_port("metrics", metrics_port)?,
     };
 
-    if ports.http == ports.grpc || ports.http == ports.metrics || ports.grpc == ports.metrics {
-        return Err("Host ports must be unique for HTTP, gRPC, and metrics.".to_string());
+    let selected_ports = [ports.http, ports.grpc, ports.metrics]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let unique_ports = selected_ports.iter().copied().collect::<HashSet<_>>().len();
+
+    if selected_ports.len() != unique_ports {
+        return Err("Host ports must be unique when provided.".to_string());
     }
 
     let network = docker_network.trim();
-    let network_valid = !network.is_empty()
-        && network.len() <= 128
-        && network
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':' | '/'));
+    let network = if network.is_empty() {
+        None
+    } else {
+        let network_valid = network.len() <= 128
+            && network
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':' | '/'));
 
-    if !network_valid {
-        return Err(
-            "Docker network must be non-empty and contain only letters, numbers, '.', '_', '-', ':', or '/'."
-                .to_string(),
-        );
-    }
+        if !network_valid {
+            return Err(
+                "Docker network must contain only letters, numbers, '.', '_', '-', ':', or '/'."
+                    .to_string(),
+            );
+        }
+
+        Some(network.to_string())
+    };
 
     Ok(StartServingOptions {
         gpu_id: gpu.0,
         ports,
-        network: network.to_string(),
+        network,
     })
 }
 
-fn parse_host_port(label: &str, value: &str) -> Result<u16, String> {
+fn parse_optional_host_port(label: &str, value: &str) -> Result<Option<u16>, String> {
+    if value.trim().is_empty() {
+        return Ok(None);
+    }
+
     let port = value
         .trim()
         .parse::<u16>()
@@ -528,7 +547,7 @@ fn parse_host_port(label: &str, value: &str) -> Result<u16, String> {
     if port == 0 {
         Err(format!("{label} host port must be between 1 and 65535."))
     } else {
-        Ok(port)
+        Ok(Some(port))
     }
 }
 
@@ -669,10 +688,10 @@ mod tests {
             .expect("valid serving options");
 
         assert_eq!(options.gpu_id, 1);
-        assert_eq!(options.ports.http, 9000);
-        assert_eq!(options.ports.grpc, 9001);
-        assert_eq!(options.ports.metrics, 9002);
-        assert_eq!(options.network, "custom_net");
+        assert_eq!(options.ports.http, Some(9000));
+        assert_eq!(options.ports.grpc, Some(9001));
+        assert_eq!(options.ports.metrics, Some(9002));
+        assert_eq!(options.network.as_deref(), Some("custom_net"));
     }
 
     #[test]
@@ -684,11 +703,14 @@ mod tests {
     }
 
     #[test]
-    fn build_start_serving_options_rejects_blank_network() {
-        let err = build_start_serving_options(GpuId(0), "8000", "8001", "8002", " ")
-            .expect_err("blank network rejected");
+    fn build_start_serving_options_accepts_blank_optional_fields() {
+        let options =
+            build_start_serving_options(GpuId(0), "", "", "", " ").expect("blank options valid");
 
-        assert!(err.contains("Docker network"));
+        assert_eq!(options.ports.http, None);
+        assert_eq!(options.ports.grpc, None);
+        assert_eq!(options.ports.metrics, None);
+        assert_eq!(options.network, None);
     }
 }
 

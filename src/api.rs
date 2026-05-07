@@ -145,7 +145,7 @@ fn validate_serving_options(options: &StartServingOptions) -> Result<(), AppErro
     ];
 
     for (label, port) in ports {
-        if port == 0 {
+        if port == Some(0) {
             return Err(AppError::Validation(format!(
                 "{label} host port must be between 1 and 65535"
             )));
@@ -154,27 +154,32 @@ fn validate_serving_options(options: &StartServingOptions) -> Result<(), AppErro
 
     let mut seen = HashSet::new();
     for (_, port) in ports {
-        if !seen.insert(port) {
+        if let Some(port) = port
+            && !seen.insert(port)
+        {
             return Err(AppError::Validation(
                 "host ports must be unique for HTTP, gRPC, and metrics".into(),
             ));
         }
     }
 
-    let network = options.network.trim();
-    let network_valid = !network.is_empty()
-        && network.len() <= 128
-        && network
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':' | '/'));
+    if let Some(network) = &options.network {
+        let network = network.trim();
+        let network_valid = !network.is_empty()
+            && network.len() <= 128
+            && network
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':' | '/'));
 
-    if network_valid {
-        Ok(())
-    } else {
-        Err(AppError::Validation(
-            "Docker network must be non-empty and contain only letters, numbers, '.', '_', '-', ':', or '/'".into(),
-        ))
+        if !network_valid {
+            return Err(AppError::Validation(
+                "Docker network must contain only letters, numbers, '.', '_', '-', ':', or '/'"
+                    .into(),
+            ));
+        }
     }
+
+    Ok(())
 }
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
@@ -826,7 +831,7 @@ pub async fn start_group_serving(
             &triton_tag,
             GpuId(options.gpu_id),
             options.ports,
-            options.network.trim(),
+            options.network.as_deref().map(str::trim),
         )
         .await
         {
