@@ -226,6 +226,7 @@ mod tests {
             progress_percent: 100,
             output_path: Some(PathBuf::from("/tmp/model")),
             error_message: None,
+            warmup_inputs: Vec::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

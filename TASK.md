@@ -16,15 +16,15 @@ Edit (✎) icon next to Download on a completed job. Click → inline editor pre
 
 Upload form collects 0..N warmup inputs `{ key, data_type, dims, zero_data }`. Pipeline persists them and `fill_template()` renders `$INPUT_WARMUP_BLOCKS`. If empty, the whole `model_warmup { … }` block is omitted.
 
-- [ ] `src/models/job.rs` — add `WarmupInput` + `TritonDataType`; extend `SubmitJobRequest` and `ConversionJob` with `warmup_inputs: Vec<WarmupInput>`
-- [ ] `migrations/0006_add_warmup_inputs.sql` — `ALTER TABLE conversion_jobs ADD COLUMN warmup_inputs TEXT NOT NULL DEFAULT '[]'`
-- [ ] `src/server/db.rs` — round-trip `warmup_inputs` through `insert_job` / `get_job` / `list_*`
-- [ ] `src/server/onnx_config.rs` — add `format_warmup_blocks`; substitute `$INPUT_WARMUP_BLOCKS` in `fill_template`; strip the entire `model_warmup { … }` block when the vec is empty
-- [ ] Unit tests for non-empty + empty warmup rendering
-- [ ] `src/server/conversion.rs` — pass `warmup_inputs` through to `generate_config_pbtxt`
-- [ ] `src/components/upload_form.rs` — repeatable warmup-input UI with key / data_type / dims / zero_data
-- [ ] `cargo fmt && cargo clippy -- -D warnings && cargo test` clean
-- [ ] Commit: `feat(warmup): support multiple model_warmup inputs end-to-end`
+- [x] `src/models/job.rs` — add `WarmupInput` + `TritonDataType`; extend `SubmitJobRequest` and `ConversionJob` with `warmup_inputs: Vec<WarmupInput>`
+- [x] `migrations/0006_add_warmup_inputs.sql` — `ALTER TABLE conversion_jobs ADD COLUMN warmup_inputs TEXT NOT NULL DEFAULT '[]'`
+- [x] `src/server/db.rs` — round-trip `warmup_inputs` through `insert_job` / `get_job` / `list_*`
+- [x] `src/server/onnx_config.rs` — add `format_warmup_blocks`; substitute `$INPUT_WARMUP_BLOCKS` in `fill_template`; strip the entire `model_warmup { … }` block when the vec is empty
+- [x] Unit tests for non-empty + empty warmup rendering
+- [x] `src/server/conversion.rs` — pass `warmup_inputs` through to `generate_config_pbtxt`
+- [x] `src/components/upload_form.rs` — repeatable warmup-input UI with key / data_type / dims / zero_data
+- [x] `cargo fmt && cargo clippy -- -D warnings && cargo test` clean
+- [x] Commit: `feat(warmup): support multiple model_warmup inputs end-to-end`
 
 ## Phase 3 — Start/Stop tritonserver from group card
 

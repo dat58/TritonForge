@@ -1,6 +1,7 @@
 //! ONNX metadata extraction and Triton config.pbtxt generation.
 
 use crate::errors::AppError;
+use crate::models::job::WarmupInput;
 use crate::onnx::{
     GRAPH_INITIALIZER_FIELD, GRAPH_INPUT_FIELD, GRAPH_OUTPUT_FIELD, MODEL_GRAPH_FIELD,
     TENSOR_ELEM_TYPE_FIELD, TENSOR_SHAPE_FIELD, TYPE_TENSOR_FIELD, VALUE_NAME_FIELD,
@@ -17,13 +18,18 @@ const CONFIG_TEMPLATE: &str = include_str!(concat!(
 ));
 
 /// Generates `config.pbtxt` from `templates/config.pbtxt` and ONNX graph metadata.
+///
+/// `warmup_inputs` is rendered into the `model_warmup` block. When empty, the
+/// entire `model_warmup { … }` block is stripped from the output so the
+/// generated config doesn't ship with stub warmup data.
 pub async fn generate_config_pbtxt(
     model_path: &Path,
     model_name: &str,
+    warmup_inputs: &[WarmupInput],
 ) -> Result<String, AppError> {
     let model_bytes = fs::read(model_path).await?;
     let metadata = parse_onnx_metadata(&model_bytes)?;
-    fill_template(CONFIG_TEMPLATE, model_name, &metadata)
+    fill_template(CONFIG_TEMPLATE, model_name, &metadata, warmup_inputs)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,12 +128,20 @@ fn fill_template(
     template: &str,
     model_name: &str,
     metadata: &OnnxMetadata,
+    warmup_inputs: &[WarmupInput],
 ) -> Result<String, AppError> {
-    let mut rendered = template.to_owned();
+    let pre_substituted = if warmup_inputs.is_empty() {
+        strip_model_warmup_block(template)
+    } else {
+        template.to_owned()
+    };
+
+    let mut rendered = pre_substituted;
     let replacements = [
         ("$MODEL_NAME", model_name.to_owned()),
         ("$INPUT_BLOCKS", format_tensor_blocks(&metadata.inputs)),
         ("$OUTPUT_BLOCKS", format_tensor_blocks(&metadata.outputs)),
+        ("$INPUT_WARMUP_BLOCKS", format_warmup_blocks(warmup_inputs)),
     ];
 
     for (placeholder, value) in replacements {
@@ -158,6 +172,76 @@ fn format_tensor_block(tensor: &TensorMetadata) -> String {
         tensor.triton_type,
         format_dims(&tensor.dims)
     )
+}
+
+/// Formats the `model_warmup.inputs` map literal as `[ { key: ..., value { ... } }, ... ]`.
+///
+/// Returns `[]` for empty inputs (caller is expected to strip the block instead
+/// when the vec is empty so this branch is unused in production).
+fn format_warmup_blocks(inputs: &[WarmupInput]) -> String {
+    if inputs.is_empty() {
+        return "[]".to_owned();
+    }
+    let entries = inputs
+        .iter()
+        .map(format_warmup_entry)
+        .collect::<Vec<_>>()
+        .join(",\n");
+    format!("[\n{entries}\n  ]")
+}
+
+fn format_warmup_entry(input: &WarmupInput) -> String {
+    let dim_values: Vec<String> = input.dims.iter().map(ToString::to_string).collect();
+    let data_field = if input.zero_data {
+        "zero_data: true"
+    } else {
+        "random_data: true"
+    };
+    format!(
+        "    {{\n      key: \"{key}\"\n      value: {{\n        data_type: {dt}\n        dims: [ {dims} ]\n        {data_field}\n      }}\n    }}",
+        key = input.key,
+        dt = input.data_type.as_pbtxt(),
+        dims = dim_values.join(", ")
+    )
+}
+
+/// Removes the entire `model_warmup { … }` block from `template`.
+///
+/// Brace-aware so a future template with nested messages inside the warmup block
+/// still strips correctly. Leaves the template untouched if the block isn't found
+/// or braces are unbalanced.
+fn strip_model_warmup_block(template: &str) -> String {
+    let Some(start) = template.find("model_warmup") else {
+        return template.to_owned();
+    };
+    let after_keyword = start + "model_warmup".len();
+    let Some(open_offset) = template[after_keyword..].find('{') else {
+        return template.to_owned();
+    };
+    let scan_start = after_keyword + open_offset + 1;
+    let bytes = template.as_bytes();
+    let mut depth: i32 = 1;
+    let mut idx = scan_start;
+    while idx < bytes.len() && depth > 0 {
+        match bytes[idx] {
+            b'{' => depth += 1,
+            b'}' => depth -= 1,
+            _ => {}
+        }
+        idx += 1;
+    }
+    if depth != 0 {
+        return template.to_owned();
+    }
+    let mut end = idx;
+    if end < bytes.len() && bytes[end] == b'\n' {
+        end += 1;
+    }
+
+    let mut out = String::with_capacity(template.len());
+    out.push_str(&template[..start]);
+    out.push_str(&template[end..]);
+    out
 }
 
 fn format_dims(dims: &[i64]) -> String {
@@ -239,7 +323,7 @@ mod tests {
         let template =
             "name: \"$MODEL_NAME\"\ninput [\n$INPUT_BLOCKS\n]\noutput [\n$OUTPUT_BLOCKS\n]";
 
-        let rendered = fill_template(template, "resnet", &metadata).expect("render template");
+        let rendered = fill_template(template, "resnet", &metadata, &[]).expect("render template");
 
         assert!(rendered.contains("name: \"images\""));
         assert!(rendered.contains("dims: [ 224, 224, 3 ]"));
@@ -265,6 +349,7 @@ mod tests {
             "input [\n$INPUT_BLOCKS\n]\noutput [\n$OUTPUT_BLOCKS\n]",
             "detector",
             &metadata,
+            &[],
         )
         .expect("render template");
 
@@ -278,6 +363,59 @@ mod tests {
         assert!(rendered.contains("name: \"scores\""));
         assert!(rendered.contains("dims: [ 100 ]"));
         assert!(rendered.contains("dims: [ 100, 4 ]\n  },\n  {\n    name: \"scores\""));
+    }
+
+    #[test]
+    fn renders_multiple_warmup_blocks() {
+        use crate::models::job::TritonDataType;
+        let metadata = OnnxMetadata {
+            inputs: vec![tensor("images", "TYPE_FP32", vec![-1, 3, 224, 224])],
+            outputs: vec![tensor("scores", "TYPE_FP32", vec![-1, 1000])],
+        };
+        let template = "model_warmup {\n    name: \"$MODEL_NAME\"\n    inputs: $INPUT_WARMUP_BLOCKS\n}\ninput [\n$INPUT_BLOCKS\n]\noutput [\n$OUTPUT_BLOCKS\n]";
+        let warmups = vec![
+            WarmupInput {
+                key: "INPUT0".to_string(),
+                data_type: TritonDataType::Fp32,
+                dims: vec![1, 3, 224, 224],
+                zero_data: true,
+            },
+            WarmupInput {
+                key: "INPUT1".to_string(),
+                data_type: TritonDataType::Int64,
+                dims: vec![1],
+                zero_data: false,
+            },
+        ];
+
+        let rendered =
+            fill_template(template, "resnet", &metadata, &warmups).expect("render template");
+
+        assert!(rendered.contains("model_warmup"));
+        assert!(rendered.contains("key: \"INPUT0\""));
+        assert!(rendered.contains("key: \"INPUT1\""));
+        assert!(rendered.contains("data_type: TYPE_FP32"));
+        assert!(rendered.contains("data_type: TYPE_INT64"));
+        assert!(rendered.contains("dims: [ 1, 3, 224, 224 ]"));
+        assert!(rendered.contains("zero_data: true"));
+        assert!(rendered.contains("random_data: true"));
+        assert!(!rendered.contains("$INPUT_WARMUP_BLOCKS"));
+    }
+
+    #[test]
+    fn omits_model_warmup_block_when_inputs_empty() {
+        let metadata = OnnxMetadata {
+            inputs: vec![tensor("images", "TYPE_FP32", vec![-1, 3, 224, 224])],
+            outputs: vec![tensor("scores", "TYPE_FP32", vec![-1, 1000])],
+        };
+        let template = "name: \"$MODEL_NAME\"\nmodel_warmup {\n    name: \"$MODEL_NAME\"\n    inputs: $INPUT_WARMUP_BLOCKS\n}\ninput [\n$INPUT_BLOCKS\n]\noutput [\n$OUTPUT_BLOCKS\n]";
+
+        let rendered = fill_template(template, "resnet", &metadata, &[]).expect("render template");
+
+        assert!(!rendered.contains("model_warmup"));
+        assert!(!rendered.contains("$INPUT_WARMUP_BLOCKS"));
+        assert!(rendered.contains("name: \"resnet\""));
+        assert!(rendered.contains("name: \"images\""));
     }
 
     #[test]

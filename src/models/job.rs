@@ -77,6 +77,9 @@ pub struct ConversionJob {
     pub output_path: Option<PathBuf>,
     /// Human-readable error description when status is `Failed`.
     pub error_message: Option<String>,
+    /// Per-input model_warmup entries that get rendered into config.pbtxt.
+    #[serde(default)]
+    pub warmup_inputs: Vec<WarmupInput>,
     /// Timestamp when the job was created.
     pub created_at: DateTime<Utc>,
     /// Timestamp of the last status update.
@@ -96,6 +99,113 @@ pub struct ConversionJobLog {
     pub message: String,
     /// Timestamp when the log row was persisted.
     pub created_at: DateTime<Utc>,
+}
+
+/// Triton tensor data types accepted by `model_warmup` inputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TritonDataType {
+    /// `TYPE_FP32`
+    Fp32,
+    /// `TYPE_FP16`
+    Fp16,
+    /// `TYPE_BF16`
+    Bf16,
+    /// `TYPE_FP64`
+    Fp64,
+    /// `TYPE_INT8`
+    Int8,
+    /// `TYPE_INT16`
+    Int16,
+    /// `TYPE_INT32`
+    Int32,
+    /// `TYPE_INT64`
+    Int64,
+    /// `TYPE_UINT8`
+    Uint8,
+    /// `TYPE_UINT16`
+    Uint16,
+    /// `TYPE_UINT32`
+    Uint32,
+    /// `TYPE_UINT64`
+    Uint64,
+    /// `TYPE_BOOL`
+    Bool,
+}
+
+impl TritonDataType {
+    /// Every variant in the order used for UI dropdowns.
+    pub const ALL: &'static [Self] = &[
+        Self::Fp32,
+        Self::Fp16,
+        Self::Bf16,
+        Self::Fp64,
+        Self::Int8,
+        Self::Int16,
+        Self::Int32,
+        Self::Int64,
+        Self::Uint8,
+        Self::Uint16,
+        Self::Uint32,
+        Self::Uint64,
+        Self::Bool,
+    ];
+
+    /// Returns the pbtxt enum literal (e.g., `"TYPE_FP32"`).
+    pub fn as_pbtxt(self) -> &'static str {
+        match self {
+            Self::Fp32 => "TYPE_FP32",
+            Self::Fp16 => "TYPE_FP16",
+            Self::Bf16 => "TYPE_BF16",
+            Self::Fp64 => "TYPE_FP64",
+            Self::Int8 => "TYPE_INT8",
+            Self::Int16 => "TYPE_INT16",
+            Self::Int32 => "TYPE_INT32",
+            Self::Int64 => "TYPE_INT64",
+            Self::Uint8 => "TYPE_UINT8",
+            Self::Uint16 => "TYPE_UINT16",
+            Self::Uint32 => "TYPE_UINT32",
+            Self::Uint64 => "TYPE_UINT64",
+            Self::Bool => "TYPE_BOOL",
+        }
+    }
+}
+
+impl std::fmt::Display for TritonDataType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_pbtxt())
+    }
+}
+
+impl std::str::FromStr for TritonDataType {
+    type Err = crate::errors::AppError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        for variant in Self::ALL {
+            if variant.as_pbtxt() == s {
+                return Ok(*variant);
+            }
+        }
+        Err(crate::errors::AppError::Validation(format!(
+            "unknown Triton data type: {s}"
+        )))
+    }
+}
+
+/// One entry of `model_warmup.inputs` in Triton's `config.pbtxt`.
+///
+/// Renders to a `{ key: "...", value { data_type: ..., dims: [...], zero_data|random_data: true } }`
+/// block. The `data` discriminant is currently `zero_data` when `zero_data` is true,
+/// otherwise `random_data`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WarmupInput {
+    /// Triton input name this warmup binds to.
+    pub key: String,
+    /// Data type used to fill the warmup tensor.
+    pub data_type: TritonDataType,
+    /// Tensor shape used during warmup (excludes batch when `max_batch_size > 0`).
+    pub dims: Vec<i64>,
+    /// When true, fill the tensor with zero bytes; otherwise use random data.
+    pub zero_data: bool,
 }
 
 /// TensorRT conversion options for trtexec.
@@ -149,6 +259,9 @@ pub struct SubmitJobRequest {
     pub gpu_id: u32,
     /// TensorRT conversion options.
     pub trt_options: TrtOptions,
+    /// Optional `model_warmup` entries to bake into the generated config.pbtxt.
+    #[serde(default)]
+    pub warmup_inputs: Vec<WarmupInput>,
 }
 
 /// Model source selected on the upload page.

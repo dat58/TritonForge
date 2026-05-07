@@ -4,7 +4,7 @@ use crate::errors::AppError;
 use crate::models::config::GpuId;
 use crate::models::group::{GroupId, ModelGroup, ModelGroupMember};
 use crate::models::job::{
-    ConversionJob, ConversionJobLog, JobId, JobStatus, ModelFormat, TrtOptions,
+    ConversionJob, ConversionJobLog, JobId, JobStatus, ModelFormat, TrtOptions, WarmupInput,
 };
 use chrono::DateTime;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode};
@@ -72,6 +72,7 @@ struct ConversionJobRow {
     image_tag: String,
     gpu_id: i64,
     trt_options: String,
+    warmup_inputs: String,
     status: String,
     progress_percent: i64,
     output_path: Option<String>,
@@ -102,6 +103,9 @@ fn row_to_job(row: ConversionJobRow) -> Result<ConversionJob, AppError> {
     let trt_options: TrtOptions = serde_json::from_str(&row.trt_options)
         .map_err(|e| AppError::Conversion(format!("failed to parse trt_options: {e}")))?;
 
+    let warmup_inputs: Vec<WarmupInput> = serde_json::from_str(&row.warmup_inputs)
+        .map_err(|e| AppError::Conversion(format!("failed to parse warmup_inputs: {e}")))?;
+
     Ok(ConversionJob {
         id: JobId(id_uuid),
         model_name: row.model_name,
@@ -114,6 +118,7 @@ fn row_to_job(row: ConversionJobRow) -> Result<ConversionJob, AppError> {
         progress_percent: checked_progress(row.progress_percent)?,
         output_path: row.output_path.map(PathBuf::from),
         error_message: row.error_message,
+        warmup_inputs,
         created_at,
         updated_at,
     })
@@ -150,11 +155,14 @@ pub async fn insert_job(pool: &DbPool, job: &ConversionJob) -> Result<(), AppErr
     let trt_options_json = serde_json::to_string(&job.trt_options)
         .map_err(|e| AppError::Conversion(format!("failed to serialize trt_options: {e}")))?;
 
+    let warmup_json = serde_json::to_string(&job.warmup_inputs)
+        .map_err(|e| AppError::Conversion(format!("failed to serialize warmup_inputs: {e}")))?;
+
     sqlx::query(
         "INSERT INTO conversion_jobs \
          (id, model_name, model_version, model_format, image_tag, gpu_id, template_name, trt_options, \
-          status, progress_percent, output_path, error_message, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          warmup_inputs, status, progress_percent, output_path, error_message, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(job.id.to_string())
     .bind(&job.model_name)
@@ -164,6 +172,7 @@ pub async fn insert_job(pool: &DbPool, job: &ConversionJob) -> Result<(), AppErr
     .bind(i64::from(job.gpu_id.0))
     .bind("config")
     .bind(trt_options_json)
+    .bind(warmup_json)
     .bind(job.status.to_string())
     .bind(i64::from(job.progress_percent))
     .bind(
@@ -257,7 +266,7 @@ pub async fn update_job_failed(
 pub async fn get_job(pool: &DbPool, job_id: &JobId) -> Result<ConversionJob, AppError> {
     let row = sqlx::query_as::<_, ConversionJobRow>(
         "SELECT id, model_name, model_version, model_format, image_tag, gpu_id, trt_options, \
-         status, progress_percent, output_path, error_message, created_at, updated_at \
+         warmup_inputs, status, progress_percent, output_path, error_message, created_at, updated_at \
          FROM conversion_jobs WHERE id = ?",
     )
     .bind(job_id.to_string())
@@ -276,7 +285,7 @@ pub async fn list_jobs(
 ) -> Result<Vec<ConversionJob>, AppError> {
     let rows = sqlx::query_as::<_, ConversionJobRow>(
         "SELECT id, model_name, model_version, model_format, image_tag, gpu_id, trt_options, \
-         status, progress_percent, output_path, error_message, created_at, updated_at \
+         warmup_inputs, status, progress_percent, output_path, error_message, created_at, updated_at \
          FROM conversion_jobs \
          ORDER BY created_at DESC \
          LIMIT ? OFFSET ?",
@@ -294,7 +303,7 @@ pub async fn list_jobs(
 pub async fn list_completed_jobs(pool: &DbPool) -> Result<Vec<ConversionJob>, AppError> {
     let rows = sqlx::query_as::<_, ConversionJobRow>(
         "SELECT id, model_name, model_version, model_format, image_tag, gpu_id, trt_options, \
-         status, progress_percent, output_path, error_message, created_at, updated_at \
+         warmup_inputs, status, progress_percent, output_path, error_message, created_at, updated_at \
          FROM conversion_jobs \
          WHERE status = 'completed' \
          ORDER BY created_at DESC \
@@ -628,6 +637,7 @@ mod tests {
             progress_percent: 0,
             output_path: None,
             error_message: None,
+            warmup_inputs: Vec::new(),
             created_at: now,
             updated_at: now,
         }

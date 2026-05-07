@@ -15,6 +15,10 @@ instance_group [
 
 #max_batch_size: 8
 
+model_warmup {                                                                        
+    name: "$MODEL_NAME"  
+    inputs: $INPUT_WARMUP_BLOCKS                                                    
+}
 
 input [
 $INPUT_BLOCKS
