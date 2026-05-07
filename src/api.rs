@@ -11,6 +11,7 @@ use dioxus::prelude::*;
 use crate::models::config::{GpuInfo, TensorRtImage};
 use crate::models::group::{GroupId, ModelGroup, ModelGroupMember};
 use crate::models::job::{ConversionJob, JobId, SubmitJobRequest};
+use crate::models::serving::ServingContainer;
 use crate::onnx::OnnxTensorInfo;
 
 // ---------------------------------------------------------------------------
@@ -706,6 +707,178 @@ pub async fn list_completed_jobs() -> Result<Vec<ConversionJob>, ServerFnError> 
     {
         let pool = db_pool().await.map_err(to_server_err)?;
         db::list_completed_jobs(pool).await.map_err(to_server_err)
+    }
+    #[cfg(not(all(not(target_arch = "wasm32"), feature = "server")))]
+    unreachable!()
+}
+
+// ── Tritonserver group serving ────────────────────────────────────────────────
+
+/// Starts a `tritonserver` container that mounts the group directory and serves
+/// every model in it.
+#[server]
+#[tracing::instrument(skip_all, fields(group_id = %group_id, gpu_id))]
+pub async fn start_group_serving(group_id: GroupId, gpu_id: u32) -> Result<(), ServerFnError> {
+    #[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
+    {
+        use crate::models::serving::ServingStatus;
+        use crate::server::serving::{
+            container_name_for_group, spawn_log_pump, start_tritonserver, triton_image_for_tensorrt,
+        };
+        use std::sync::Arc;
+
+        let pool = db_pool().await.map_err(to_server_err)?;
+        let docker = docker_service().await.map_err(to_server_err)?;
+        let group = db::get_group(pool, &group_id)
+            .await
+            .map_err(to_server_err)?;
+
+        if group.members.is_empty() {
+            return Err(to_server_err(AppError::Validation(
+                "group has no members to serve".into(),
+            )));
+        }
+
+        let first_job_id = parse_job_id(&group.members[0].job_id).map_err(to_server_err)?;
+        let first_job = db::get_job(pool, &first_job_id)
+            .await
+            .map_err(to_server_err)?;
+        let triton_tag = triton_image_for_tensorrt(&first_job.image_tag).ok_or_else(|| {
+            to_server_err(AppError::Validation(format!(
+                "cannot derive tritonserver image from '{}'",
+                first_job.image_tag
+            )))
+        })?;
+
+        if !docker
+            .is_image_available(&triton_tag)
+            .await
+            .map_err(to_server_err)?
+        {
+            docker
+                .pull_image(&triton_tag)
+                .await
+                .map_err(to_server_err)?;
+        }
+
+        // Mark starting (overwrites any prior row for this group).
+        let starting = crate::models::serving::ServingContainer {
+            group_id: group.id.clone(),
+            container_id: String::new(),
+            container_name: container_name_for_group(&group.id),
+            image_tag: triton_tag.clone(),
+            gpu_id,
+            status: ServingStatus::Starting,
+            error_message: None,
+            started_at: chrono::Utc::now(),
+            stopped_at: None,
+        };
+        db::upsert_serving_container(pool, &starting)
+            .await
+            .map_err(to_server_err)?;
+
+        let started = match start_tritonserver(docker, &group, &triton_tag, GpuId(gpu_id)).await {
+            Ok(c) => c,
+            Err(e) => {
+                let msg = e.to_string();
+                let _ =
+                    db::update_serving_status(pool, &group_id, ServingStatus::Error, Some(&msg))
+                        .await;
+                return Err(to_server_err(e));
+            }
+        };
+
+        db::upsert_serving_container(pool, &started)
+            .await
+            .map_err(to_server_err)?;
+
+        let pool_arc = Arc::new(pool.clone());
+        spawn_log_pump(
+            docker.clone(),
+            pool_arc,
+            group.id.clone(),
+            started.container_id.clone(),
+            tracing::Span::current(),
+        );
+
+        Ok(())
+    }
+    #[cfg(not(all(not(target_arch = "wasm32"), feature = "server")))]
+    unreachable!()
+}
+
+/// Stops a previously started group serving container.
+#[server]
+#[tracing::instrument(skip_all, fields(group_id = %group_id))]
+pub async fn stop_group_serving(group_id: GroupId) -> Result<(), ServerFnError> {
+    #[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
+    {
+        use crate::models::serving::ServingStatus;
+
+        let pool = db_pool().await.map_err(to_server_err)?;
+        let docker = docker_service().await.map_err(to_server_err)?;
+        let Some(serving) = db::get_serving_by_group(pool, &group_id)
+            .await
+            .map_err(to_server_err)?
+        else {
+            return Ok(());
+        };
+
+        if let Err(e) =
+            crate::server::serving::stop_tritonserver(docker, &serving.container_id).await
+        {
+            let msg = e.to_string();
+            let _ =
+                db::update_serving_status(pool, &group_id, ServingStatus::Error, Some(&msg)).await;
+            return Err(to_server_err(e));
+        }
+
+        db::update_serving_status(pool, &group_id, ServingStatus::Stopped, None)
+            .await
+            .map_err(to_server_err)
+    }
+    #[cfg(not(all(not(target_arch = "wasm32"), feature = "server")))]
+    unreachable!()
+}
+
+/// Returns the current serving record for a group, or `None` if not started.
+#[server]
+#[tracing::instrument(skip_all, fields(group_id = %group_id))]
+pub async fn get_group_serving_status(
+    group_id: GroupId,
+) -> Result<Option<ServingContainer>, ServerFnError> {
+    #[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
+    {
+        let pool = db_pool().await.map_err(to_server_err)?;
+        db::get_serving_by_group(pool, &group_id)
+            .await
+            .map_err(to_server_err)
+    }
+    #[cfg(not(all(not(target_arch = "wasm32"), feature = "server")))]
+    unreachable!()
+}
+
+/// Returns persisted `tritonserver` logs for a group, joined as a single string.
+#[server]
+#[tracing::instrument(skip_all, fields(group_id = %group_id, limit))]
+pub async fn get_group_serving_logs(
+    group_id: GroupId,
+    limit: u32,
+) -> Result<String, ServerFnError> {
+    #[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
+    {
+        let pool = db_pool().await.map_err(to_server_err)?;
+        let Some(serving) = db::get_serving_by_group(pool, &group_id)
+            .await
+            .map_err(to_server_err)?
+        else {
+            return Ok(String::new());
+        };
+        let capped = limit.clamp(1, 1_000);
+        let lines = db::tail_serving_logs(pool, &serving.container_id, capped)
+            .await
+            .map_err(to_server_err)?;
+        Ok(lines.join("\n"))
     }
     #[cfg(not(all(not(target_arch = "wasm32"), feature = "server")))]
     unreachable!()

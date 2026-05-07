@@ -30,11 +30,11 @@ Upload form collects 0..N warmup inputs `{ key, data_type, dims, zero_data }`. P
 
 Each `GroupCard` exposes a Start (▶) / Stop (■) icon and a status pill, plus an expandable Logs panel that streams live container output (2 s polling, mirrors job_detail).
 
-- [ ] `migrations/0007_create_tritonserver_containers.sql` — `tritonserver_containers` + `tritonserver_logs` tables
-- [ ] `src/models/serving.rs` — `ServingContainer` struct + `ServingStatus` enum
-- [ ] `src/server/db.rs` — `upsert_serving`, `get_serving_by_group`, `mark_serving_stopped`, `append_serving_logs_batch`, `tail_serving_logs`
-- [ ] `src/server/docker.rs` — `start_tritonserver` (binds group dir to `/models`, exposes 8000/8001/8002, GPU device request), `stop_tritonserver`, `spawn_tritonserver_log_pump`
-- [ ] `src/api.rs` — `start_group_serving(group_id, gpu_id)`, `stop_group_serving(group_id)`, `get_group_serving_status(group_id)`, `get_group_serving_logs(group_id, limit)`
-- [ ] `src/components/group_card.rs` — status pill, ▶/■ icon, Start dialog with GPU dropdown, expandable `<pre>` logs panel
-- [ ] `cargo fmt && cargo clippy -- -D warnings && cargo test` clean
-- [ ] Commit: `feat(groups): start/stop tritonserver from group card with live logs`
+- [x] `migrations/0007_create_tritonserver_containers.sql` — `tritonserver_containers` + `tritonserver_logs` tables
+- [x] `src/models/serving.rs` — `ServingContainer` struct + `ServingStatus` enum
+- [x] `src/server/db.rs` — `upsert_serving_container`, `get_serving_by_group`, `update_serving_status`, `append_serving_logs_batch`, `tail_serving_logs`
+- [x] `src/server/serving.rs` — `start_tritonserver` (binds group dir to `/models`, exposes 8000/8001/8002, GPU device request), `stop_tritonserver`, `spawn_log_pump`
+- [x] `src/api.rs` — `start_group_serving(group_id, gpu_id)`, `stop_group_serving(group_id)`, `get_group_serving_status(group_id)`, `get_group_serving_logs(group_id, limit)`
+- [x] `src/components/group_card.rs` — status pill, ▶/■ icon, Start dialog with GPU dropdown, expandable `<pre>` logs panel
+- [x] `cargo fmt && cargo clippy -- -D warnings && cargo test` clean
+- [x] Commit: `feat(groups): start/stop tritonserver from group card with live logs`
