@@ -59,8 +59,8 @@ Post-launch UX cleanup: warmup is auto-derived from ONNX (no user input), config
 - [x] Commit: `style(job_detail): enlarge config.pbtxt editor with horizontal scroll`
 
 ### 4c — Equalize group-card action button heights
-- [ ] `src/components/group_card.rs` — Delete / Confirm buttons get `h-8 inline-flex items-center justify-center`, drop `py-1.5`
-- [ ] Commit: `style(group_card): equalize action button heights`
+- [x] `src/components/group_card.rs` — Delete / Confirm buttons get `h-8 inline-flex items-center justify-center`, drop `py-1.5`
+- [x] Commit: `style(group_card): equalize action button heights`
 
 ### 4d — Lift Start dialog and logs panel out of the card; full-width below grid
 - [ ] `src/components/group_card.rs` — remove `show_start_dialog` / `show_logs` / `start_gpu` state; props gain `serving_view`, `on_request_start`, `on_toggle_logs`

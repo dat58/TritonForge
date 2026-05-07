@@ -222,7 +222,7 @@ pub fn GroupCard(props: GroupCardProps) -> Element {
 
                 if is_running {
                     button {
-                        class: "flex-shrink-0 w-8 h-8 rounded-md text-rose-300 hover:text-rose-200 hover:bg-rose-950/40 border border-rose-900/40 transition-colors text-xs disabled:opacity-50",
+                        class: "flex-shrink-0 w-8 h-8 inline-flex items-center justify-center rounded-md text-rose-300 hover:text-rose-200 hover:bg-rose-950/40 border border-rose-900/40 transition-colors text-xs disabled:opacity-50",
                         title: "Stop tritonserver",
                         disabled: *serving_busy.read(),
                         onclick: move |_| {
@@ -241,7 +241,7 @@ pub fn GroupCard(props: GroupCardProps) -> Element {
                     }
                 } else {
                     button {
-                        class: "flex-shrink-0 w-8 h-8 rounded-md text-emerald-300 hover:text-emerald-200 hover:bg-emerald-950/40 border border-emerald-900/40 transition-colors text-xs disabled:opacity-50",
+                        class: "flex-shrink-0 w-8 h-8 inline-flex items-center justify-center rounded-md text-emerald-300 hover:text-emerald-200 hover:bg-emerald-950/40 border border-emerald-900/40 transition-colors text-xs disabled:opacity-50",
                         title: "Start tritonserver",
                         disabled: *serving_busy.read(),
                         onclick: move |_| {
@@ -253,7 +253,7 @@ pub fn GroupCard(props: GroupCardProps) -> Element {
                 }
                 button {
                     r#type: "button",
-                    class: "flex-shrink-0 w-8 h-8 rounded-md text-slate-300 hover:text-cyan-300 hover:bg-slate-800/70 border border-slate-700 transition-colors text-xs",
+                    class: "flex-shrink-0 w-8 h-8 inline-flex items-center justify-center rounded-md text-slate-300 hover:text-cyan-300 hover:bg-slate-800/70 border border-slate-700 transition-colors text-xs",
                     title: if *show_logs.read() { "Hide logs" } else { "Show logs" },
                     onclick: move |_| {
                         show_logs.toggle();
@@ -264,7 +264,7 @@ pub fn GroupCard(props: GroupCardProps) -> Element {
 
                 if *confirm_delete.read() {
                     button {
-                        class: "flex-1 py-1.5 rounded-lg text-xs font-medium bg-rose-700 hover:bg-rose-600 text-white border border-rose-600 transition-all duration-200",
+                        class: "flex-1 h-8 inline-flex items-center justify-center rounded-lg text-xs font-medium bg-rose-700 hover:bg-rose-600 text-white border border-rose-600 transition-all duration-200",
                         onclick: move |_| {
                             confirm_delete.set(false);
                             props.on_release.call(group_id_release.clone());
@@ -273,7 +273,7 @@ pub fn GroupCard(props: GroupCardProps) -> Element {
                     }
                 } else {
                     button {
-                        class: "flex-1 py-1.5 rounded-lg text-xs font-medium bg-rose-900/40 hover:bg-rose-800/60 text-rose-300 border border-rose-800/50 transition-all duration-200",
+                        class: "flex-1 h-8 inline-flex items-center justify-center rounded-lg text-xs font-medium bg-rose-900/40 hover:bg-rose-800/60 text-rose-300 border border-rose-800/50 transition-all duration-200",
                         onclick: move |_| confirm_delete.set(true),
                         "Delete"
                     }
