@@ -112,9 +112,9 @@ pub fn GroupCard(props: GroupCardProps) -> Element {
     };
 
     let border_class = if props.selected {
-        "glass-card p-5 border-cyan-500 cursor-pointer"
+        "glass-card p-5 border-cyan-500 cursor-pointer flex flex-col gap-4"
     } else {
-        "glass-card p-5 hover:border-slate-600 cursor-pointer"
+        "glass-card p-5 hover:border-slate-600 cursor-pointer flex flex-col gap-4"
     };
 
     rsx! {
@@ -128,10 +128,10 @@ pub fn GroupCard(props: GroupCardProps) -> Element {
             },
 
             // Header: name or edit input
-            div { class: "flex items-center justify-between mb-3",
+            div { class: "flex items-center justify-between",
                 if *editing.read() {
                     div {
-                        class: "flex items-center gap-2 flex-1",
+                        class: "flex items-center gap-3 flex-1",
                         onclick: move |evt| evt.stop_propagation(),
                         input {
                             r#type: "text",
@@ -197,14 +197,14 @@ pub fn GroupCard(props: GroupCardProps) -> Element {
             }
 
             // Stats
-            div { class: "flex flex-col gap-1 mb-4",
-                div { class: "flex items-center gap-1.5",
+            div { class: "flex flex-col gap-2",
+                div { class: "flex items-center gap-2",
                     span {
                         class: "px-2 py-0.5 rounded-full text-xs font-medium bg-slate-700 text-slate-300",
                         "{models_label}"
                     }
                 }
-                div { class: "flex items-center gap-1.5 min-w-0",
+                div { class: "flex items-center gap-2 min-w-0",
                     p { class: "text-slate-500 text-xs font-mono truncate flex-1 min-w-0", title: "{dir}", "{dir}" }
                     button {
                         class: "flex-shrink-0 w-6 h-6 rounded-md text-slate-500 hover:text-cyan-300 hover:bg-slate-800/70 transition-colors text-xs",
@@ -227,7 +227,7 @@ pub fn GroupCard(props: GroupCardProps) -> Element {
             {serving_status_row(serving_status)}
 
             // Actions
-            div { class: "flex items-center gap-2",
+            div { class: "flex items-center gap-3",
                 onclick: move |evt| evt.stop_propagation(),
 
                 if is_running {
@@ -328,7 +328,7 @@ fn serving_status_row(status: Option<ServingStatus>) -> Element {
         ),
     };
     rsx! {
-        div { class: "flex items-center mb-3",
+        div { class: "flex items-center",
             span { class: "{classes}", "{label}" }
         }
     }

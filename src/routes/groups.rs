@@ -372,7 +372,7 @@ fn serving_panel(state: ServingPanelState<'_>) -> Element {
                             div { class: "px-5 py-4 text-sm text-slate-500", "Open logs to load tritonserver output." }
                         },
                         Some(Ok(Some(text))) => rsx! {
-                            pre { class: "h-[70vh] min-h-96 overflow-auto p-4 text-xs text-slate-300 whitespace-pre font-mono",
+                            pre { class: "block h-[76vh] min-h-[36rem] max-h-[76vh] max-w-full overflow-x-auto overflow-y-scroll overscroll-contain p-4 text-xs text-slate-300 whitespace-pre font-mono",
                                 if text.trim().is_empty() {
                                     "No tritonserver logs yet."
                                 } else {

@@ -105,7 +105,7 @@ pub fn JobDetailPage(job_id: String) -> Element {
 
     rsx! {
         div { class: "min-h-screen",
-            div { class: "max-w-3xl mx-auto px-4 sm:px-6 py-14",
+            div { class: "max-w-6xl mx-auto px-4 sm:px-6 py-14",
 
                 // Back nav
                 div { class: "mb-8",
@@ -303,7 +303,7 @@ pub fn JobDetailPage(job_id: String) -> Element {
                                             }
                                         }
                                         if *editing_config.read() {
-                                            div { class: "mt-4 rounded-xl border border-slate-800 bg-slate-950/60 p-3",
+                                            div { class: "mt-5 rounded-xl border border-slate-800 bg-slate-950/60 p-4",
                                                 if let Some(ref err) = *config_load_error.read() {
                                                     div { class: "rounded-lg px-3 py-2 text-rose-400 text-sm border border-rose-800/50 bg-rose-950/30 mb-3",
                                                         "Failed to load config.pbtxt: {err}"
@@ -315,7 +315,7 @@ pub fn JobDetailPage(job_id: String) -> Element {
                                                     }
                                                 } else {
                                                     textarea {
-                                                        class: "w-full h-[70vh] min-h-96 rounded-lg bg-slate-900 border border-slate-800 text-slate-200 text-xs font-mono p-3 focus:outline-none focus:border-cyan-700 overflow-auto",
+                                                        class: "w-full h-[82vh] min-h-[42rem] rounded-lg bg-slate-900 border border-slate-800 text-slate-200 text-sm font-mono p-4 focus:outline-none focus:border-cyan-700 overflow-auto",
                                                         spellcheck: "false",
                                                         wrap: "off",
                                                         value: "{config_buf.read()}",
