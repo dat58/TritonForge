@@ -4,68 +4,9 @@ use crate::api::{inspect_onnx_path, submit_job};
 use crate::app::Route;
 use crate::components::{GpuSelector, ImageSelector};
 use crate::models::config::GpuId;
-use crate::models::job::{
-    ModelInputSource, SubmitJobRequest, TritonDataType, TrtOptions, WarmupInput,
-};
+use crate::models::job::{ModelInputSource, SubmitJobRequest, TrtOptions};
 use crate::onnx::{OnnxTensorInfo, parse_onnx_inputs};
 use dioxus::prelude::*;
-use std::str::FromStr;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct WarmupDraft {
-    key: String,
-    data_type: TritonDataType,
-    dims_text: String,
-    zero_data: bool,
-}
-
-impl WarmupDraft {
-    fn new() -> Self {
-        Self {
-            key: String::new(),
-            data_type: TritonDataType::Fp32,
-            dims_text: String::new(),
-            zero_data: true,
-        }
-    }
-}
-
-fn parse_dims_text(text: &str) -> Result<Vec<i64>, String> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return Err("dims cannot be empty".to_owned());
-    }
-    trimmed
-        .split(',')
-        .map(|chunk| {
-            chunk
-                .trim()
-                .parse::<i64>()
-                .map_err(|e| format!("invalid dim '{chunk}': {e}"))
-        })
-        .collect()
-}
-
-fn drafts_to_warmup_inputs(drafts: &[WarmupDraft]) -> Result<Vec<WarmupInput>, String> {
-    drafts
-        .iter()
-        .enumerate()
-        .map(|(idx, draft)| {
-            let key = draft.key.trim();
-            if key.is_empty() {
-                return Err(format!("warmup #{} is missing a key", idx + 1));
-            }
-            let dims = parse_dims_text(&draft.dims_text)
-                .map_err(|e| format!("warmup #{} dims: {e}", idx + 1))?;
-            Ok(WarmupInput {
-                key: key.to_owned(),
-                data_type: draft.data_type,
-                dims,
-                zero_data: draft.zero_data,
-            })
-        })
-        .collect()
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UploadSource {
@@ -101,8 +42,6 @@ pub fn UploadForm() -> Element {
     let mut avg_timing = use_signal(|| 16u32);
     let mut fp16 = use_signal(|| true);
     let mut show_advanced = use_signal(|| false);
-    let mut warmup_drafts: Signal<Vec<WarmupDraft>> = use_signal(Vec::new);
-    let mut show_warmup = use_signal(|| false);
 
     let nav = use_navigator();
 
@@ -449,121 +388,6 @@ pub fn UploadForm() -> Element {
                 }
             }
 
-            // ── Model Warmup Toggle ──────────────────────────────────────
-            button {
-                r#type: "button",
-                class: "flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-slate-500 hover:text-slate-300 transition-colors w-max",
-                onclick: move |_| show_warmup.toggle(),
-                span { if *show_warmup.read() { "▼" } else { "▶" } }
-                "Model Warmup ({warmup_drafts.read().len()})"
-            }
-
-            if *show_warmup.read() {
-                div { class: "flex flex-col gap-3 p-4 rounded-xl border border-slate-800 bg-slate-900/30",
-                    p { class: "text-[11px] text-slate-500",
-                        "Add one entry per Triton input you want to warm up. Empty list omits the model_warmup block."
-                    }
-                    for (idx, draft) in warmup_drafts.read().iter().enumerate().map(|(i, d)| (i, d.clone())) {
-                        div { class: "rounded-lg border border-slate-800/80 bg-slate-950/40 p-3 flex flex-col gap-2",
-                            div { class: "grid grid-cols-2 gap-3",
-                                div { class: "flex flex-col gap-1",
-                                    label { class: "text-[10px] font-bold uppercase text-slate-500", "Key (input name)" }
-                                    input {
-                                        r#type: "text",
-                                        class: "field text-xs py-1.5",
-                                        placeholder: "INPUT0",
-                                        value: "{draft.key}",
-                                        oninput: move |evt| {
-                                            if let Some(entry) = warmup_drafts.write().get_mut(idx) {
-                                                entry.key = evt.value();
-                                            }
-                                        }
-                                    }
-                                }
-                                div { class: "flex flex-col gap-1",
-                                    label { class: "text-[10px] font-bold uppercase text-slate-500", "Data Type" }
-                                    select {
-                                        class: "field text-xs py-1.5",
-                                        value: "{draft.data_type}",
-                                        onchange: move |evt| {
-                                            if let Ok(dt) = TritonDataType::from_str(&evt.value())
-                                                && let Some(entry) = warmup_drafts.write().get_mut(idx) {
-                                                    entry.data_type = dt;
-                                                }
-                                        },
-                                        for variant in TritonDataType::ALL {
-                                            option {
-                                                value: "{variant.as_pbtxt()}",
-                                                selected: draft.data_type == *variant,
-                                                "{variant.as_pbtxt()}"
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            div { class: "flex flex-col gap-1",
-                                label { class: "text-[10px] font-bold uppercase text-slate-500", "Dims (comma-separated)" }
-                                input {
-                                    r#type: "text",
-                                    class: "field text-xs py-1.5",
-                                    placeholder: "1, 3, 224, 224",
-                                    value: "{draft.dims_text}",
-                                    oninput: move |evt| {
-                                        if let Some(entry) = warmup_drafts.write().get_mut(idx) {
-                                            entry.dims_text = evt.value();
-                                        }
-                                    }
-                                }
-                            }
-                            div { class: "flex items-center justify-between",
-                                div { class: "flex items-center gap-4",
-                                    label { class: "flex items-center gap-1.5 cursor-pointer text-xs text-slate-300",
-                                        input {
-                                            r#type: "radio",
-                                            name: "warmup-data-{idx}",
-                                            checked: draft.zero_data,
-                                            onchange: move |_| {
-                                                if let Some(entry) = warmup_drafts.write().get_mut(idx) {
-                                                    entry.zero_data = true;
-                                                }
-                                            }
-                                        }
-                                        "zero_data"
-                                    }
-                                    label { class: "flex items-center gap-1.5 cursor-pointer text-xs text-slate-300",
-                                        input {
-                                            r#type: "radio",
-                                            name: "warmup-data-{idx}",
-                                            checked: !draft.zero_data,
-                                            onchange: move |_| {
-                                                if let Some(entry) = warmup_drafts.write().get_mut(idx) {
-                                                    entry.zero_data = false;
-                                                }
-                                            }
-                                        }
-                                        "random_data"
-                                    }
-                                }
-                                button {
-                                    r#type: "button",
-                                    class: "text-xs px-2 py-1 rounded-md text-rose-300 hover:text-rose-200 hover:bg-rose-950/40 border border-rose-900/50 transition-colors",
-                                    onclick: move |_| {
-                                        warmup_drafts.write().remove(idx);
-                                    },
-                                    "Remove"
-                                }
-                            }
-                        }
-                    }
-                    button {
-                        r#type: "button",
-                        class: "self-start text-xs px-3 py-1.5 rounded-lg text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors",
-                        onclick: move |_| warmup_drafts.write().push(WarmupDraft::new()),
-                        "+ Add warmup input"
-                    }
-                }
-            }
-
             // ── Error ─────────────────────────────────────────────────────
             if let Some(ref msg) = *error_msg.read() {
                 div { class: "rounded-lg px-4 py-3 text-rose-400 text-sm border border-rose-800/50 bg-rose-950/30",
@@ -628,14 +452,6 @@ pub fn UploadForm() -> Element {
                         fp16: *fp16.read(),
                     };
 
-                    let warmup_inputs = match drafts_to_warmup_inputs(&warmup_drafts.read()) {
-                        Ok(list) => list,
-                        Err(e) => {
-                            error_msg.set(Some(e));
-                            return;
-                        }
-                    };
-
                     let req = SubmitJobRequest {
                         input_source,
                         model_name: name,
@@ -643,7 +459,6 @@ pub fn UploadForm() -> Element {
                         image_tag: img,
                         gpu_id: gpu.0,
                         trt_options: trt_opts,
-                        warmup_inputs,
                     };
 
                     submitting.set(true);

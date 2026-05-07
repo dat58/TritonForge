@@ -78,7 +78,6 @@ fn build_new_job(
     image_tag: String,
     gpu_id: GpuId,
     trt_options: TrtOptions,
-    warmup_inputs: Vec<crate::models::job::WarmupInput>,
 ) -> ConversionJob {
     let now = chrono::Utc::now();
     ConversionJob {
@@ -93,7 +92,6 @@ fn build_new_job(
         progress_percent: 0,
         output_path: None,
         error_message: None,
-        warmup_inputs,
         created_at: now,
         updated_at: now,
     }
@@ -295,7 +293,6 @@ pub async fn submit_job(
         req.image_tag,
         GpuId(req.gpu_id),
         req.trt_options,
-        req.warmup_inputs,
     );
     let job_id = job.id.clone();
 

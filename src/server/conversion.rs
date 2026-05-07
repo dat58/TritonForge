@@ -267,8 +267,7 @@ impl ConversionService {
         db::update_job_status(&self.pool, &job.id, JobStatus::Finalizing, 95).await?;
 
         let plan_path = find_plan_file(temp_output_dir).await?;
-        let config_pbtxt =
-            generate_config_pbtxt(model_path, &job.model_name, &job.warmup_inputs).await?;
+        let config_pbtxt = generate_config_pbtxt(model_path, &job.model_name).await?;
         let model_dir = self
             .storage
             .move_to_output(

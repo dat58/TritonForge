@@ -38,3 +38,31 @@ Each `GroupCard` exposes a Start (▶) / Stop (■) icon and a status pill, plus
 - [x] `src/components/group_card.rs` — status pill, ▶/■ icon, Start dialog with GPU dropdown, expandable `<pre>` logs panel
 - [x] `cargo fmt && cargo clippy -- -D warnings && cargo test` clean
 - [x] Commit: `feat(groups): start/stop tritonserver from group card with live logs`
+
+## Phase 4 — UX refinements
+
+Post-launch UX cleanup: warmup is auto-derived from ONNX (no user input), config.pbtxt editor is large with horizontal scroll, group-card buttons line up, and the Start dialog + Logs panel render full-width below the grid instead of growing the card.
+
+### 4a — Auto-generate warmup from ONNX
+- [x] `src/server/onnx_config.rs` — drop `warmup_inputs` parameter; auto-derive warmup entries from `metadata.inputs` inside `fill_template`; remove `strip_model_warmup_block`
+- [x] `src/models/job.rs` — delete `WarmupInput` + `TritonDataType`; remove `warmup_inputs` field from `ConversionJob` and `SubmitJobRequest`
+- [x] `src/server/conversion.rs` — drop `&job.warmup_inputs` arg
+- [x] `src/api.rs` — drop `warmup_inputs` from `build_new_job` and `submit_job`
+- [x] `src/server/db.rs` — remove `warmup_inputs` column round-trip
+- [x] `migrations/0008_drop_warmup_inputs.sql` — `ALTER TABLE conversion_jobs DROP COLUMN warmup_inputs`
+- [x] `src/components/upload_form.rs` — rip out `WarmupDraft` + warmup form section
+- [x] Replace warmup tests with `auto_generates_warmup_from_inputs`
+- [x] Commit: `refactor(warmup): auto-generate model_warmup from ONNX inputs`
+
+### 4b — Larger, scroll-x config.pbtxt editor
+- [ ] `src/routes/job_detail.rs` — textarea `h-[70vh] min-h-96 overflow-auto`, `wrap="off"`
+- [ ] Commit: `style(job_detail): enlarge config.pbtxt editor with horizontal scroll`
+
+### 4c — Equalize group-card action button heights
+- [ ] `src/components/group_card.rs` — Delete / Confirm buttons get `h-8 inline-flex items-center justify-center`, drop `py-1.5`
+- [ ] Commit: `style(group_card): equalize action button heights`
+
+### 4d — Lift Start dialog and logs panel out of the card; full-width below grid
+- [ ] `src/components/group_card.rs` — remove `show_start_dialog` / `show_logs` / `start_gpu` state; props gain `serving_view`, `on_request_start`, `on_toggle_logs`
+- [ ] `src/routes/groups.rs` — `ServingView` enum + signal; render Start dialog and Logs panel full-width below the grid
+- [ ] Commit: `feat(groups): render serving start dialog and logs full-width below grid`
