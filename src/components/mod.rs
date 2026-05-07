@@ -9,7 +9,7 @@ pub mod progress_bar;
 pub mod upload_form;
 
 pub use gpu_selector::GpuSelector;
-pub use group_card::GroupCard;
+pub use group_card::{GroupCard, ServingView};
 pub use image_selector::ImageSelector;
 pub use job_card::JobCard;
 pub use navbar::Navbar;

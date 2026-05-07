@@ -3,3 +3,4 @@
 pub mod config;
 pub mod group;
 pub mod job;
+pub mod serving;

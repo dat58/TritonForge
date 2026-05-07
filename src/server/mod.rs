@@ -8,4 +8,5 @@ pub mod db;
 pub mod docker;
 pub mod gpu;
 pub mod onnx_config;
+pub mod serving;
 pub mod storage;

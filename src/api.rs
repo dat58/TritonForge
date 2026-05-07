@@ -11,6 +11,7 @@ use dioxus::prelude::*;
 use crate::models::config::{GpuInfo, TensorRtImage};
 use crate::models::group::{GroupId, ModelGroup, ModelGroupMember};
 use crate::models::job::{ConversionJob, JobId, SubmitJobRequest};
+use crate::models::serving::{ServingContainer, StartServingOptions};
 use crate::onnx::OnnxTensorInfo;
 
 // ---------------------------------------------------------------------------
@@ -133,6 +134,52 @@ fn validate_model_name(name: &str) -> Result<(), AppError> {
             "model name must contain only letters, numbers, '.', '_', or '-'".into(),
         ))
     }
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
+fn validate_serving_options(options: &StartServingOptions) -> Result<(), AppError> {
+    let ports = [
+        ("HTTP", options.ports.http),
+        ("gRPC", options.ports.grpc),
+        ("metrics", options.ports.metrics),
+    ];
+
+    for (label, port) in ports {
+        if port == Some(0) {
+            return Err(AppError::Validation(format!(
+                "{label} host port must be between 1 and 65535"
+            )));
+        }
+    }
+
+    let mut seen = HashSet::new();
+    for (_, port) in ports {
+        if let Some(port) = port
+            && !seen.insert(port)
+        {
+            return Err(AppError::Validation(
+                "host ports must be unique for HTTP, gRPC, and metrics".into(),
+            ));
+        }
+    }
+
+    if let Some(network) = &options.network {
+        let network = network.trim();
+        let network_valid = !network.is_empty()
+            && network.len() <= 128
+            && network
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':' | '/'));
+
+        if !network_valid {
+            return Err(AppError::Validation(
+                "Docker network must contain only letters, numbers, '.', '_', '-', ':', or '/'"
+                    .into(),
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
@@ -406,6 +453,56 @@ pub async fn get_job_logs(job_id: String, limit: u32) -> Result<String, ServerFn
     Ok(logs)
 }
 
+/// Returns the on-disk `config.pbtxt` for a completed job.
+#[server]
+#[tracing::instrument(skip_all, fields(job_id))]
+pub async fn get_job_config_pbtxt(job_id: String) -> Result<String, ServerFnError> {
+    let pool = db_pool().await.map_err(to_server_err)?;
+    let jid = parse_job_id(&job_id).map_err(to_server_err)?;
+    let job = db::get_job(pool, &jid).await.map_err(to_server_err)?;
+
+    if job.status != JobStatus::Completed {
+        return Err(to_server_err(AppError::Validation(
+            "config.pbtxt is only available for completed jobs".into(),
+        )));
+    }
+
+    storage_service()
+        .read_config_pbtxt(&jid, &job.model_name)
+        .await
+        .map_err(to_server_err)
+}
+
+/// Overwrites the on-disk `config.pbtxt` for a completed job.
+#[server]
+#[tracing::instrument(skip_all, fields(job_id, byte_len = contents.len()))]
+pub async fn update_job_config_pbtxt(
+    job_id: String,
+    contents: String,
+) -> Result<(), ServerFnError> {
+    const MAX_CONFIG_BYTES: usize = 256 * 1024;
+    if contents.len() > MAX_CONFIG_BYTES {
+        return Err(to_server_err(AppError::Validation(format!(
+            "config.pbtxt exceeds {MAX_CONFIG_BYTES} byte limit"
+        ))));
+    }
+
+    let pool = db_pool().await.map_err(to_server_err)?;
+    let jid = parse_job_id(&job_id).map_err(to_server_err)?;
+    let job = db::get_job(pool, &jid).await.map_err(to_server_err)?;
+
+    if job.status != JobStatus::Completed {
+        return Err(to_server_err(AppError::Validation(
+            "only completed jobs can have config.pbtxt edited".into(),
+        )));
+    }
+
+    storage_service()
+        .write_config_pbtxt(&jid, &job.model_name, &contents)
+        .await
+        .map_err(to_server_err)
+}
+
 /// Stops a running conversion job by stopping its Docker container.
 #[server]
 #[tracing::instrument(skip_all, fields(job_id))]
@@ -653,6 +750,192 @@ pub async fn list_completed_jobs() -> Result<Vec<ConversionJob>, ServerFnError> 
     {
         let pool = db_pool().await.map_err(to_server_err)?;
         db::list_completed_jobs(pool).await.map_err(to_server_err)
+    }
+    #[cfg(not(all(not(target_arch = "wasm32"), feature = "server")))]
+    unreachable!()
+}
+
+// ── Tritonserver group serving ────────────────────────────────────────────────
+
+/// Starts a `tritonserver` container that mounts the group directory and serves
+/// every model in it.
+#[server]
+#[tracing::instrument(skip_all, fields(group_id = %group_id))]
+pub async fn start_group_serving(
+    group_id: GroupId,
+    options: StartServingOptions,
+) -> Result<(), ServerFnError> {
+    #[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
+    {
+        use crate::models::serving::ServingStatus;
+        use crate::server::serving::{
+            container_name_for_group, spawn_log_pump, start_tritonserver, triton_image_for_tensorrt,
+        };
+        use std::sync::Arc;
+
+        validate_serving_options(&options).map_err(to_server_err)?;
+
+        let pool = db_pool().await.map_err(to_server_err)?;
+        let docker = docker_service().await.map_err(to_server_err)?;
+        let group = db::get_group(pool, &group_id)
+            .await
+            .map_err(to_server_err)?;
+
+        if group.members.is_empty() {
+            return Err(to_server_err(AppError::Validation(
+                "group has no members to serve".into(),
+            )));
+        }
+
+        let first_job_id = parse_job_id(&group.members[0].job_id).map_err(to_server_err)?;
+        let first_job = db::get_job(pool, &first_job_id)
+            .await
+            .map_err(to_server_err)?;
+        let triton_tag = triton_image_for_tensorrt(&first_job.image_tag).ok_or_else(|| {
+            to_server_err(AppError::Validation(format!(
+                "cannot derive tritonserver image from '{}'",
+                first_job.image_tag
+            )))
+        })?;
+
+        if !docker
+            .is_image_available(&triton_tag)
+            .await
+            .map_err(to_server_err)?
+        {
+            docker
+                .pull_image(&triton_tag)
+                .await
+                .map_err(to_server_err)?;
+        }
+
+        // Mark starting (overwrites any prior row for this group).
+        let starting = crate::models::serving::ServingContainer {
+            group_id: group.id.clone(),
+            container_id: String::new(),
+            container_name: container_name_for_group(&group.id),
+            image_tag: triton_tag.clone(),
+            gpu_id: options.gpu_id,
+            status: ServingStatus::Starting,
+            error_message: None,
+            started_at: chrono::Utc::now(),
+            stopped_at: None,
+        };
+        db::upsert_serving_container(pool, &starting)
+            .await
+            .map_err(to_server_err)?;
+
+        let started = match start_tritonserver(
+            docker,
+            &group,
+            &triton_tag,
+            GpuId(options.gpu_id),
+            options.ports,
+            options.network.as_deref().map(str::trim),
+        )
+        .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                let msg = e.to_string();
+                let _ =
+                    db::update_serving_status(pool, &group_id, ServingStatus::Error, Some(&msg))
+                        .await;
+                return Err(to_server_err(e));
+            }
+        };
+
+        db::upsert_serving_container(pool, &started)
+            .await
+            .map_err(to_server_err)?;
+
+        let pool_arc = Arc::new(pool.clone());
+        spawn_log_pump(
+            docker.clone(),
+            pool_arc,
+            group.id.clone(),
+            started.container_id.clone(),
+            tracing::Span::current(),
+        );
+
+        Ok(())
+    }
+    #[cfg(not(all(not(target_arch = "wasm32"), feature = "server")))]
+    unreachable!()
+}
+
+/// Stops a previously started group serving container.
+#[server]
+#[tracing::instrument(skip_all, fields(group_id = %group_id))]
+pub async fn stop_group_serving(group_id: GroupId) -> Result<(), ServerFnError> {
+    #[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
+    {
+        use crate::models::serving::ServingStatus;
+
+        let pool = db_pool().await.map_err(to_server_err)?;
+        let docker = docker_service().await.map_err(to_server_err)?;
+        let Some(serving) = db::get_serving_by_group(pool, &group_id)
+            .await
+            .map_err(to_server_err)?
+        else {
+            return Ok(());
+        };
+
+        if let Err(e) =
+            crate::server::serving::stop_tritonserver(docker, &serving.container_id).await
+        {
+            let msg = e.to_string();
+            let _ =
+                db::update_serving_status(pool, &group_id, ServingStatus::Error, Some(&msg)).await;
+            return Err(to_server_err(e));
+        }
+
+        db::update_serving_status(pool, &group_id, ServingStatus::Stopped, None)
+            .await
+            .map_err(to_server_err)
+    }
+    #[cfg(not(all(not(target_arch = "wasm32"), feature = "server")))]
+    unreachable!()
+}
+
+/// Returns the current serving record for a group, or `None` if not started.
+#[server]
+#[tracing::instrument(skip_all, fields(group_id = %group_id))]
+pub async fn get_group_serving_status(
+    group_id: GroupId,
+) -> Result<Option<ServingContainer>, ServerFnError> {
+    #[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
+    {
+        let pool = db_pool().await.map_err(to_server_err)?;
+        db::get_serving_by_group(pool, &group_id)
+            .await
+            .map_err(to_server_err)
+    }
+    #[cfg(not(all(not(target_arch = "wasm32"), feature = "server")))]
+    unreachable!()
+}
+
+/// Returns persisted `tritonserver` logs for a group, joined as a single string.
+#[server]
+#[tracing::instrument(skip_all, fields(group_id = %group_id, limit))]
+pub async fn get_group_serving_logs(
+    group_id: GroupId,
+    limit: u32,
+) -> Result<String, ServerFnError> {
+    #[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
+    {
+        let pool = db_pool().await.map_err(to_server_err)?;
+        let Some(serving) = db::get_serving_by_group(pool, &group_id)
+            .await
+            .map_err(to_server_err)?
+        else {
+            return Ok(String::new());
+        };
+        let capped = limit.clamp(1, 10_000);
+        let lines = db::tail_serving_logs(pool, &serving.container_id, capped)
+            .await
+            .map_err(to_server_err)?;
+        Ok(lines.join("\n"))
     }
     #[cfg(not(all(not(target_arch = "wasm32"), feature = "server")))]
     unreachable!()
