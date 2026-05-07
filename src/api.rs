@@ -406,6 +406,56 @@ pub async fn get_job_logs(job_id: String, limit: u32) -> Result<String, ServerFn
     Ok(logs)
 }
 
+/// Returns the on-disk `config.pbtxt` for a completed job.
+#[server]
+#[tracing::instrument(skip_all, fields(job_id))]
+pub async fn get_job_config_pbtxt(job_id: String) -> Result<String, ServerFnError> {
+    let pool = db_pool().await.map_err(to_server_err)?;
+    let jid = parse_job_id(&job_id).map_err(to_server_err)?;
+    let job = db::get_job(pool, &jid).await.map_err(to_server_err)?;
+
+    if job.status != JobStatus::Completed {
+        return Err(to_server_err(AppError::Validation(
+            "config.pbtxt is only available for completed jobs".into(),
+        )));
+    }
+
+    storage_service()
+        .read_config_pbtxt(&jid, &job.model_name)
+        .await
+        .map_err(to_server_err)
+}
+
+/// Overwrites the on-disk `config.pbtxt` for a completed job.
+#[server]
+#[tracing::instrument(skip_all, fields(job_id, byte_len = contents.len()))]
+pub async fn update_job_config_pbtxt(
+    job_id: String,
+    contents: String,
+) -> Result<(), ServerFnError> {
+    const MAX_CONFIG_BYTES: usize = 256 * 1024;
+    if contents.len() > MAX_CONFIG_BYTES {
+        return Err(to_server_err(AppError::Validation(format!(
+            "config.pbtxt exceeds {MAX_CONFIG_BYTES} byte limit"
+        ))));
+    }
+
+    let pool = db_pool().await.map_err(to_server_err)?;
+    let jid = parse_job_id(&job_id).map_err(to_server_err)?;
+    let job = db::get_job(pool, &jid).await.map_err(to_server_err)?;
+
+    if job.status != JobStatus::Completed {
+        return Err(to_server_err(AppError::Validation(
+            "only completed jobs can have config.pbtxt edited".into(),
+        )));
+    }
+
+    storage_service()
+        .write_config_pbtxt(&jid, &job.model_name, &contents)
+        .await
+        .map_err(to_server_err)
+}
+
 /// Stops a running conversion job by stopping its Docker container.
 #[server]
 #[tracing::instrument(skip_all, fields(job_id))]

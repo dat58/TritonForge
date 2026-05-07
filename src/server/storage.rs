@@ -154,6 +154,63 @@ impl StorageService {
         )))
     }
 
+    /// Reads the rendered `config.pbtxt` for a completed job's model.
+    #[instrument(skip(self), fields(job_id = %job_id, model_name))]
+    pub async fn read_config_pbtxt(
+        &self,
+        job_id: &JobId,
+        model_name: &str,
+    ) -> Result<String, AppError> {
+        let path = self.config_pbtxt_path(job_id, model_name);
+        match fs::read_to_string(&path).await {
+            Ok(contents) => Ok(contents),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(AppError::Validation(
+                format!("config.pbtxt not found for job {job_id}"),
+            )),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Atomically overwrites the `config.pbtxt` for a completed job's model.
+    ///
+    /// Writes to a sibling temp file then renames over the destination so an
+    /// interrupted write cannot truncate the existing file.
+    #[instrument(skip(self, contents), fields(job_id = %job_id, model_name, byte_len = contents.len()))]
+    pub async fn write_config_pbtxt(
+        &self,
+        job_id: &JobId,
+        model_name: &str,
+        contents: &str,
+    ) -> Result<(), AppError> {
+        let dest = self.config_pbtxt_path(job_id, model_name);
+        let model_dir = dest
+            .parent()
+            .ok_or_else(|| AppError::Validation(format!("no model directory for job {job_id}")))?;
+
+        if !fs::metadata(model_dir).await?.is_dir() {
+            return Err(AppError::Validation(format!(
+                "no model directory found for job {job_id}"
+            )));
+        }
+
+        let tmp = model_dir.join(format!(".config.pbtxt.{}.tmp", Uuid::new_v4()));
+        fs::write(&tmp, contents).await?;
+        if let Err(e) = fs::rename(&tmp, &dest).await {
+            let _ = fs::remove_file(&tmp).await;
+            return Err(e.into());
+        }
+
+        tracing::info!(path = %dest.display(), "config.pbtxt updated");
+        Ok(())
+    }
+
+    fn config_pbtxt_path(&self, job_id: &JobId, model_name: &str) -> PathBuf {
+        self.output_dir
+            .join(job_id.to_string())
+            .join(model_name)
+            .join("config.pbtxt")
+    }
+
     /// Deletes a job's full output root directory (`output_dir/{job_id}/`).
     #[instrument(skip(self), fields(job_id = %job_id))]
     pub async fn delete_job_output_root(&self, job_id: &JobId) -> Result<(), AppError> {

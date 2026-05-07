@@ -1,6 +1,9 @@
 //! Job detail page with live progress tracking and download support.
 
-use crate::api::{cancel_job, download_model, get_job_logs, get_job_status};
+use crate::api::{
+    cancel_job, download_model, get_job_config_pbtxt, get_job_logs, get_job_status,
+    update_job_config_pbtxt,
+};
 use crate::app::Route;
 use crate::components::ProgressBar;
 use crate::models::job::{JobId, JobStatus};
@@ -32,6 +35,12 @@ pub fn JobDetailPage(job_id: String) -> Element {
     let mut download_error: Signal<Option<String>> = use_signal(|| None);
     let mut cancelling = use_signal(|| false);
     let mut show_logs = use_signal(|| false);
+    let mut editing_config = use_signal(|| false);
+    let mut config_buf = use_signal(String::new);
+    let mut config_loaded = use_signal(|| false);
+    let mut config_saving = use_signal(|| false);
+    let mut config_load_error: Signal<Option<String>> = use_signal(|| None);
+    let mut config_save_error: Signal<Option<String>> = use_signal(|| None);
 
     let logs = use_resource({
         let job_id = job_id.clone();
@@ -221,38 +230,141 @@ pub fn JobDetailPage(job_id: String) -> Element {
                                                 "{err}"
                                             }
                                         }
-                                        button {
-                                            class: "w-full py-3.5 rounded-xl font-semibold text-sm text-white transition-all duration-200 disabled:opacity-50",
-                                            style: "background: linear-gradient(135deg, #059669, #0d9488); box-shadow: 0 4px 16px rgba(5,150,105,0.3);",
-                                            disabled: *downloading.read(),
-                                            onclick: move |_| {
-                                                let dl_id   = jid_for_dl.to_string();
-                                                let dl_name = model_name.clone();
-                                                downloading.set(true);
-                                                download_error.set(None);
-                                                spawn(async move {
-                                                    match download_model(dl_id).await {
-                                                        Ok(bytes) => {
-                                                            trigger_browser_download(
-                                                                &bytes,
-                                                                &format!("{dl_name}.zip"),
-                                                            ).await;
-                                                            downloading.set(false);
+                                        div { class: "flex items-center gap-2",
+                                            button {
+                                                class: "flex-1 py-3.5 rounded-xl font-semibold text-sm text-white transition-all duration-200 disabled:opacity-50",
+                                                style: "background: linear-gradient(135deg, #059669, #0d9488); box-shadow: 0 4px 16px rgba(5,150,105,0.3);",
+                                                disabled: *downloading.read(),
+                                                onclick: {
+                                                    let jid_for_dl = jid_for_dl.clone();
+                                                    let dl_name_root = model_name.clone();
+                                                    move |_| {
+                                                        let dl_id   = jid_for_dl.to_string();
+                                                        let dl_name = dl_name_root.clone();
+                                                        downloading.set(true);
+                                                        download_error.set(None);
+                                                        spawn(async move {
+                                                            match download_model(dl_id).await {
+                                                                Ok(bytes) => {
+                                                                    trigger_browser_download(
+                                                                        &bytes,
+                                                                        &format!("{dl_name}.zip"),
+                                                                    ).await;
+                                                                    downloading.set(false);
+                                                                }
+                                                                Err(e) => {
+                                                                    download_error.set(Some(e.to_string()));
+                                                                    downloading.set(false);
+                                                                }
+                                                            }
+                                                        });
+                                                    }
+                                                },
+                                                if *downloading.read() {
+                                                    div { class: "flex items-center justify-center gap-2",
+                                                        div { class: "w-4 h-4 border-2 border-white/70 border-t-white rounded-full animate-spin" }
+                                                        "Preparing download..."
+                                                    }
+                                                } else {
+                                                    "↓  Download Model Folder"
+                                                }
+                                            }
+                                            button {
+                                                r#type: "button",
+                                                class: "flex-shrink-0 w-11 h-11 rounded-xl text-slate-300 hover:text-cyan-300 bg-slate-800/60 hover:bg-slate-800 border border-slate-700 transition-colors text-base",
+                                                title: "Edit config.pbtxt",
+                                                onclick: {
+                                                    let jid_for_edit = jid_for_dl.clone();
+                                                    move |_| {
+                                                        if *editing_config.read() {
+                                                            editing_config.set(false);
+                                                            return;
                                                         }
-                                                        Err(e) => {
-                                                            download_error.set(Some(e.to_string()));
-                                                            downloading.set(false);
+                                                        editing_config.set(true);
+                                                        config_loaded.set(false);
+                                                        config_load_error.set(None);
+                                                        config_save_error.set(None);
+                                                        let edit_id = jid_for_edit.to_string();
+                                                        spawn(async move {
+                                                            match get_job_config_pbtxt(edit_id).await {
+                                                                Ok(text) => {
+                                                                    config_buf.set(text);
+                                                                    config_loaded.set(true);
+                                                                }
+                                                                Err(e) => {
+                                                                    config_load_error.set(Some(e.to_string()));
+                                                                    config_loaded.set(true);
+                                                                }
+                                                            }
+                                                        });
+                                                    }
+                                                },
+                                                "✎"
+                                            }
+                                        }
+                                        if *editing_config.read() {
+                                            div { class: "mt-4 rounded-xl border border-slate-800 bg-slate-950/60 p-3",
+                                                if let Some(ref err) = *config_load_error.read() {
+                                                    div { class: "rounded-lg px-3 py-2 text-rose-400 text-sm border border-rose-800/50 bg-rose-950/30 mb-3",
+                                                        "Failed to load config.pbtxt: {err}"
+                                                    }
+                                                }
+                                                if !*config_loaded.read() {
+                                                    div { class: "px-3 py-3 text-sm text-slate-500",
+                                                        "Loading config.pbtxt..."
+                                                    }
+                                                } else {
+                                                    textarea {
+                                                        class: "w-full h-96 rounded-lg bg-slate-900 border border-slate-800 text-slate-200 text-xs font-mono p-3 focus:outline-none focus:border-cyan-700",
+                                                        spellcheck: "false",
+                                                        value: "{config_buf.read()}",
+                                                        oninput: move |evt| config_buf.set(evt.value()),
+                                                    }
+                                                    if let Some(ref err) = *config_save_error.read() {
+                                                        div { class: "mt-3 rounded-lg px-3 py-2 text-rose-400 text-sm border border-rose-800/50 bg-rose-950/30",
+                                                            "Save failed: {err}"
                                                         }
                                                     }
-                                                });
-                                            },
-                                            if *downloading.read() {
-                                                div { class: "flex items-center justify-center gap-2",
-                                                    div { class: "w-4 h-4 border-2 border-white/70 border-t-white rounded-full animate-spin" }
-                                                    "Preparing download..."
+                                                    div { class: "flex items-center justify-end gap-2 mt-3",
+                                                        button {
+                                                            r#type: "button",
+                                                            class: "px-4 py-2 rounded-lg text-sm text-slate-300 bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors disabled:opacity-50",
+                                                            disabled: *config_saving.read(),
+                                                            onclick: move |_| {
+                                                                editing_config.set(false);
+                                                                config_save_error.set(None);
+                                                            },
+                                                            "Cancel"
+                                                        }
+                                                        button {
+                                                            r#type: "button",
+                                                            class: "px-4 py-2 rounded-lg text-sm font-semibold text-white bg-cyan-700 hover:bg-cyan-600 transition-colors disabled:opacity-50",
+                                                            disabled: *config_saving.read(),
+                                                            onclick: {
+                                                                let jid_for_save = jid_for_dl.clone();
+                                                                move |_| {
+                                                                    let save_id = jid_for_save.to_string();
+                                                                    let payload = config_buf.read().clone();
+                                                                    config_saving.set(true);
+                                                                    config_save_error.set(None);
+                                                                    spawn(async move {
+                                                                        match update_job_config_pbtxt(save_id, payload).await {
+                                                                            Ok(()) => {
+                                                                                config_saving.set(false);
+                                                                                editing_config.set(false);
+                                                                            }
+                                                                            Err(e) => {
+                                                                                config_save_error.set(Some(e.to_string()));
+                                                                                config_saving.set(false);
+                                                                            }
+                                                                        }
+                                                                    });
+                                                                }
+                                                            },
+                                                            if *config_saving.read() { "Saving..." } else { "Save" }
+                                                        }
+                                                    }
                                                 }
-                                            } else {
-                                                "↓  Download Model Folder"
                                             }
                                         }
                                     }
