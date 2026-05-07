@@ -55,8 +55,8 @@ Post-launch UX cleanup: warmup is auto-derived from ONNX (no user input), config
 - [x] Commit: `refactor(warmup): auto-generate model_warmup from ONNX inputs`
 
 ### 4b — Larger, scroll-x config.pbtxt editor
-- [ ] `src/routes/job_detail.rs` — textarea `h-[70vh] min-h-96 overflow-auto`, `wrap="off"`
-- [ ] Commit: `style(job_detail): enlarge config.pbtxt editor with horizontal scroll`
+- [x] `src/routes/job_detail.rs` — textarea `h-[70vh] min-h-96 overflow-auto`, `wrap="off"`
+- [x] Commit: `style(job_detail): enlarge config.pbtxt editor with horizontal scroll`
 
 ### 4c — Equalize group-card action button heights
 - [ ] `src/components/group_card.rs` — Delete / Confirm buttons get `h-8 inline-flex items-center justify-center`, drop `py-1.5`

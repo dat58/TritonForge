@@ -315,8 +315,9 @@ pub fn JobDetailPage(job_id: String) -> Element {
                                                     }
                                                 } else {
                                                     textarea {
-                                                        class: "w-full h-96 rounded-lg bg-slate-900 border border-slate-800 text-slate-200 text-xs font-mono p-3 focus:outline-none focus:border-cyan-700",
+                                                        class: "w-full h-[70vh] min-h-96 rounded-lg bg-slate-900 border border-slate-800 text-slate-200 text-xs font-mono p-3 focus:outline-none focus:border-cyan-700 overflow-auto",
                                                         spellcheck: "false",
+                                                        wrap: "off",
                                                         value: "{config_buf.read()}",
                                                         oninput: move |evt| config_buf.set(evt.value()),
                                                     }
