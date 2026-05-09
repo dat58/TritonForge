@@ -65,16 +65,11 @@ impl AppConfig {
     /// Loads configuration from environment variables, falling back to safe defaults.
     pub fn from_env() -> Self {
         load_dotenv();
+        let parent = std::env::var("DATA_DIR").expect("The DATA_DIR environment variable is not set. Please ensure it matches the absolute path on the host machine when running in Docker.");
 
         Self {
-            upload_dir: PathBuf::from(
-                std::env::var("UPLOAD_DIR")
-                    .unwrap_or_else(|_| "/tmp/tensorrt-converter/uploads".into()),
-            ),
-            output_dir: PathBuf::from(
-                std::env::var("OUTPUT_DIR")
-                    .unwrap_or_else(|_| "/tmp/tensorrt-converter/outputs".into()),
-            ),
+            upload_dir: PathBuf::from(format!("{parent}/uploads")),
+            output_dir: PathBuf::from(format!("{parent}/outputs")),
             max_upload_size_mb: std::env::var("MAX_UPLOAD_SIZE_MB")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -86,10 +81,7 @@ impl AppConfig {
             docker_socket: PathBuf::from(
                 std::env::var("DOCKER_SOCKET").unwrap_or_else(|_| "/var/run/docker.sock".into()),
             ),
-            groups_dir: PathBuf::from(
-                std::env::var("GROUPS_DIR")
-                    .unwrap_or_else(|_| "/tmp/tensorrt-converter/groups".into()),
-            ),
+            groups_dir: PathBuf::from(format!("{parent}/groups")),
         }
     }
 }

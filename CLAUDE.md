@@ -295,7 +295,6 @@ MAX_UPLOAD_SIZE_MB=2048
 CONVERSION_TIMEOUT_SECS=1800
 DOCKER_SOCKET=/var/run/docker.sock
 RUST_LOG=info,tensorrt_converter=debug
-LOG_FORMAT=json
 ```
 
 ### TensorRT Docker Images Configuration
@@ -426,7 +425,7 @@ use tracing_subscriber::{fmt, EnvFilter, layer::SubscriberExt, util::SubscriberI
 
 tracing_subscriber::registry()
     .with(EnvFilter::from_default_env())
-    .with(fmt::layer().json().with_target(true).with_thread_ids(true).with_file(true).with_line_number(true))
+    .with(fmt::layer().with_target(true))
     .init();
 ```
 

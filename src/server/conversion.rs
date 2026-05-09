@@ -99,6 +99,9 @@ impl ConversionService {
         if let Err(error) = self.storage.cleanup_temp(&model_path).await {
             tracing::warn!(error = ?error, path = %model_path.display(), "upload cleanup failed");
         }
+        
+        // Remove a temp directory for container output. 
+        let _ = tokio::fs::remove_dir_all(&temp_output_dir).await;
 
         result
     }
