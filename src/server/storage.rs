@@ -130,7 +130,7 @@ impl StorageService {
         fs::create_dir_all(&version_dir).await?;
 
         let plan_path = version_dir.join("model.plan");
-        fs::rename(temp_path, &plan_path).await?;
+        fs::copy(temp_path, &plan_path).await?;
         fs::write(model_dir.join("config.pbtxt"), config_pbtxt).await?;
 
         tracing::info!(dest = %model_dir.display(), "model moved to output directory");
