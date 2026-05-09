@@ -58,10 +58,11 @@ The conversion lifecycle is intentionally explicit: pending, preparing, converti
 
 ## Environment Variables
 
-Create a local `.env` file for development. The minimal required value is:
+Create a local `.env` file for development. The minimal required values are:
 
 ```bash
 DATABASE_URL=sqlite://data/converter.db
+DATA_DIR=/path/to/your/data
 ```
 
 Supported runtime configuration:
@@ -69,13 +70,49 @@ Supported runtime configuration:
 | Variable | Purpose | Default |
 | --- | --- | --- |
 | `DATABASE_URL` | SQLite database URL used by SQLx. | `sqlite://data/converter.db` in local `.env` |
-| `UPLOAD_DIR` | Directory for staged uploaded ONNX files. | `/tmp/tensorrt-converter/uploads` |
-| `OUTPUT_DIR` | Directory for completed TensorRT outputs. | `/tmp/tensorrt-converter/outputs` |
-| `GROUPS_DIR` | Directory for model group outputs. | `/tmp/tensorrt-converter/groups` |
+| `DATA_DIR` | **Required.** Parent directory for all runtime data. Subdirectories `uploads/`, `outputs/`, and `groups/` are created under this path. | _(none, must be set)_ |
 | `MAX_UPLOAD_SIZE_MB` | Maximum upload size in MiB. | `2048` |
 | `CONVERSION_TIMEOUT_SECS` | Maximum runtime for one conversion job. | `1800` |
 | `DOCKER_SOCKET` | Docker daemon socket path. | `/var/run/docker.sock` |
 | `TENSORRT_IMAGES_CONFIG` | Optional TOML file containing known TensorRT image entries. | `config/images.toml` |
+| `RUST_LOG` | Log level filter for the application. | `info` |
+
+## Running with Docker
+
+The pre-built image is based on `nvcr.io/nvidia/cuda:11.7.0-base-ubuntu22.04`. It requires access to the host Docker socket and an NVIDIA-capable runtime so conversion containers can be spawned.
+
+### Build the image
+
+```bash
+docker build -t tritonforge:latest .
+```
+
+### Run the container
+
+```bash
+docker run -d \
+  --name tritonforge \
+  --gpus all \
+  -p 8080:8080 \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v /your/data/path:/your/data/path \
+  -e DATABASE_URL=sqlite:///your/data/path/converter.db \
+  -e DATA_DIR=/your/data/path \
+  -e RUST_LOG=info,tensorrt_converter=debug \
+  tritonforge:latest
+```
+
+> **Important — `DATA_DIR` must use the same absolute path on the host and inside the container.**
+>
+> TritonForge runs inside Docker but spawns TensorRT conversion containers as sibling containers on the host Docker daemon. When it bind-mounts ONNX files into those sibling containers, Docker resolves the paths against the **host filesystem**, not the TritonForge container filesystem. If `DATA_DIR` differs between host and container, Docker will mount the wrong path (or fail with a not-found error) when launching conversion jobs.
+>
+> Always pass the same path on both sides of the `-v` flag:
+> ```
+> -v /your/data/path:/your/data/path   # host path == container path
+> -e DATA_DIR=/your/data/path
+> ```
+
+---
 
 ## Development Setup
 
@@ -83,12 +120,6 @@ Install the Rust and Dioxus tooling:
 
 ```bash
 cargo install dioxus-cli --locked
-```
-
-Prepare local configuration:
-
-```bash
-printf 'DATABASE_URL=sqlite://data/converter.db\n' > .env
 ```
 
 Start the fullstack development server:
